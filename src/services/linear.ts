@@ -181,3 +181,26 @@ export async function getWorkflowStates(teamId: string): Promise<WorkflowState[]
   }>(GET_WORKFLOW_STATES, { teamId });
   return team.states.nodes.sort((a, b) => a.position - b.position);
 }
+
+/**
+ * Find the "In Progress" state for a team
+ * Returns the first state with type "started"
+ */
+export async function findInProgressState(teamId: string): Promise<WorkflowState | null> {
+  const states = await getWorkflowStates(teamId);
+  return states.find(s => s.type === "started") ?? null;
+}
+
+/**
+ * Move ticket to "In Progress" status
+ * Returns true if successful, false if no started state found
+ */
+export async function moveTicketToInProgress(
+  ticketIdentifier: string, 
+  teamId: string
+): Promise<boolean> {
+  const inProgressState = await findInProgressState(teamId);
+  if (!inProgressState) return false;
+  
+  return updateTicketState(ticketIdentifier, inProgressState.id);
+}
