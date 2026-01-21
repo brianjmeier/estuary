@@ -24,6 +24,7 @@ export interface WorkspaceInfo {
 }
 
 const DEFAULT_BASE_DIR = `${process.env.HOME}/.agenator/workspaces`;
+const BRANCH_PREFIX = "agenator/";
 
 /**
  * Create a new JJ workspace for an agent session
@@ -180,4 +181,29 @@ export async function checkJJInstalled(): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Generate branch name from ticket
+ * Format: agenator/ENG-123-<slug>
+ * Slug from title: lowercase, hyphenated, max 40 chars
+ */
+export function generateBranchName(ticketId: string, ticketTitle: string): string {
+  // Create slug from title
+  const slug = ticketTitle
+    .toLowerCase()
+    .replace(/[^a-z0-9\s-]/g, "") // Remove special chars except hyphens
+    .replace(/\s+/g, "-")          // Replace spaces with hyphens
+    .replace(/-+/g, "-")           // Collapse multiple hyphens
+    .slice(0, 40)                  // Max 40 chars
+    .replace(/-$/, "");            // Remove trailing hyphen
+  
+  return `${BRANCH_PREFIX}${ticketId}-${slug}`;
+}
+
+/**
+ * Generate branch name from ticket object
+ */
+export function getBranchNameFromTicket(ticket: { identifier: string; title: string }): string {
+  return generateBranchName(ticket.identifier, ticket.title);
 }
