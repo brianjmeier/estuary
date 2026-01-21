@@ -3,9 +3,12 @@ import { Box, useInput, useApp } from "ink";
 import { TabBar } from "./components/TabBar.js";
 import { SessionPane } from "./components/SessionPane.js";
 import { ActionBar } from "./components/ActionBar.js";
+import { TicketLinkModal } from "./components/TicketLinkModal.js";
 import { usePty } from "./hooks/usePty.js";
+import { useLinear } from "./hooks/useLinear.js";
 import { killAllPtys } from "./services/pty.js";
-import type { Session, SessionStatus } from "./types.js";
+import { getLinearApiKey } from "./config.js";
+import type { Session, SessionStatus, LinearTicket } from "./types.js";
 
 // For development: use bash as the agent command
 const DEV_AGENT_COMMAND = "bash";
@@ -31,14 +34,42 @@ export function App() {
   ]);
   const [activeSessionId, setActiveSessionId] = useState<string>("1");
   const [inputMode, setInputMode] = useState(false);
+  const [showTicketModal, setShowTicketModal] = useState(false);
+  const [linearApiKey, setLinearApiKey] = useState<string | undefined>(undefined);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
   const hasNeedsInput = sessions.some((s) => s.status === "needs_input");
+
+  // Load Linear API key on mount
+  useEffect(() => {
+    getLinearApiKey().then(setLinearApiKey);
+  }, []);
+
+  // Linear hook
+  const { isInitialized: isLinearInitialized, searchTickets } = useLinear(linearApiKey);
 
   // Update session status
   const updateSessionStatus = useCallback((sessionId: string, status: SessionStatus) => {
     setSessions((prev) =>
       prev.map((s) => (s.id === sessionId ? { ...s, status, updatedAt: new Date() } : s))
+    );
+  }, []);
+
+  // Link ticket to session
+  const linkTicketToSession = useCallback((sessionId: string, ticket: LinearTicket) => {
+    setSessions((prev) =>
+      prev.map((s) => 
+        s.id === sessionId 
+          ? { 
+              ...s, 
+              ticketId: ticket.identifier, 
+              ticketTitle: ticket.title,
+              ticketUrl: ticket.url,
+              name: ticket.identifier, // Auto-name session from ticket
+              updatedAt: new Date() 
+            } 
+          : s
+      )
     );
   }, []);
 
@@ -154,7 +185,20 @@ export function App() {
       ptyKill();
       updateSessionStatus(activeSession.id, "idle");
     }
+
+    // Open ticket link modal
+    if (input === "l" && activeSession && !showTicketModal) {
+      setShowTicketModal(true);
+    }
   });
+
+  // Handle ticket selection from modal
+  const handleTicketSelect = useCallback((ticket: LinearTicket) => {
+    if (activeSession) {
+      linkTicketToSession(activeSession.id, ticket);
+    }
+    setShowTicketModal(false);
+  }, [activeSession, linkTicketToSession]);
 
   const handleAction = (action: string) => {
     switch (action) {
@@ -170,7 +214,7 @@ export function App() {
         }
         break;
       case "link":
-        // TODO: Link Linear ticket
+        setShowTicketModal(true);
         break;
       case "pr":
         // TODO: Create PR from workspace
@@ -201,6 +245,13 @@ export function App() {
         hasNeedsInput={hasNeedsInput}
         activeSession={activeSession}
         inputMode={inputMode}
+      />
+      <TicketLinkModal
+        isOpen={showTicketModal}
+        onClose={() => setShowTicketModal(false)}
+        onSelect={handleTicketSelect}
+        searchTickets={searchTickets}
+        isLinearInitialized={isLinearInitialized}
       />
     </Box>
   );
