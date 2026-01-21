@@ -1,5 +1,5 @@
 import { spawnPty, killPty, type PtyHandle } from "./pty.js";
-import type { Session, SessionStatus } from "../types.js";
+import type { Session, SessionStatus, LinearTicket } from "../types.js";
 
 export interface SessionConfig {
   /** Agent command to run */
@@ -184,4 +184,26 @@ export function onSessionOutput(callback: OutputCallback): () => void {
 
 function notifySessionUpdate(session: ManagedSession): void {
   sessionUpdateCallbacks.forEach((cb) => cb(session));
+}
+
+/**
+ * Generate workspace name from ticket
+ * Uses ticket identifier (e.g., "ENG-123")
+ */
+export function getWorkspaceNameFromTicket(ticket: LinearTicket): string {
+  return ticket.identifier;
+}
+
+/**
+ * Update session with linked ticket
+ */
+export function linkTicketToSession(id: string, ticket: LinearTicket): void {
+  const session = sessions.get(id);
+  if (session) {
+    session.ticketId = ticket.identifier;
+    session.ticketTitle = ticket.title;
+    session.name = ticket.identifier; // Auto-name from ticket
+    session.updatedAt = new Date();
+    notifySessionUpdate(session);
+  }
 }
