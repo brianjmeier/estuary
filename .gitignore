@@ -1,30 +1,14 @@
-# Dependencies
-node_modules/
-
-# Build output
+.direnv/
+.nix-go/
+.nix-gocache/
+.nix-npm-cache/
+bin/
 dist/
+result
+tmp/
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Go
+coverage.out
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Environment
-.env
-.env.local
-.env.*.local
-
-# Logs
-*.log
-npm-debug.log*
-
-# Test coverage
-coverage/
-
-# Bun
-bun.lockb
+# Estuary runtime data
+.estuary/
