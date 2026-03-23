@@ -4,6 +4,34 @@ Estuary is a local Go TUI for running Claude Code and Codex sessions behind one 
 
 The current implemented feature inventory lives in [FEATURES.md](/Users/brianmeier/dev/agenator/FEATURES.md). Treat that file as the authoritative shipped-feature index.
 
+## Install
+
+If Nix is not already available in your shell, load it first:
+
+```bash
+source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+```
+
+Then you can run Estuary directly from the repo:
+
+```bash
+nix run .#estuary
+```
+
+Or install it onto your profile:
+
+```bash
+nix profile install .#estuary
+```
+
+After that, launch it with:
+
+```bash
+estuary
+```
+
+Estuary also expects the provider CLIs like `claude` and `codex` to be installed separately.
+
 ## Development
 
 This repository uses Nix flakes for the project-local toolchain. If Nix is not already available in your shell, load it first:
