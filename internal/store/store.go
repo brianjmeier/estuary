@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -66,7 +67,16 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply schema: %w", err)
 		}
 	}
-	return nil
+	for _, stmt := range []string{
+		`ALTER TABLE sessions ADD COLUMN runtime_kind TEXT NOT NULL DEFAULT 'provider_session'`,
+		`ALTER TABLE sessions ADD COLUMN active_provider_session_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE provider_runtime_processes ADD COLUMN warm INTEGER NOT NULL DEFAULT 0`,
+	} {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
+			return fmt.Errorf("apply schema upgrade: %w", err)
+		}
+	}
+	return s.backfillProviderSessions(ctx)
 }
 
 func (s *Store) seedBoundaryProfiles(ctx context.Context) error {
@@ -129,11 +139,12 @@ type scanner interface {
 
 func scanSession(s scanner) (domain.Session, error) {
 	var session domain.Session
-	var currentHabitat, boundaryProfile, status string
-	if err := s.Scan(&session.ID, &session.Title, &session.FolderPath, &session.CurrentModel, &currentHabitat, &session.NativeSessionID, &boundaryProfile, &session.ResolvedBoundarySettings, &status, &session.MigrationGeneration, &session.CreatedAt, &session.UpdatedAt, &session.LastOpenedAt); err != nil {
+	var currentHabitat, boundaryProfile, status, runtimeKind, providerStatus string
+	if err := s.Scan(&session.ID, &session.Title, &session.FolderPath, &session.CurrentModel, &currentHabitat, &runtimeKind, &session.ActiveProviderSessionID, &session.NativeSessionID, &boundaryProfile, &session.ResolvedBoundarySettings, &status, &providerStatus, &session.MigrationGeneration, &session.CreatedAt, &session.UpdatedAt, &session.LastOpenedAt); err != nil {
 		return domain.Session{}, err
 	}
 	session.CurrentHabitat = domain.Habitat(currentHabitat)
+	session.RuntimeKind = domain.SessionRuntimeKind(runtimeKind)
 	session.ModelDescriptor = domain.ModelDescriptor{
 		ID:      session.CurrentModel,
 		Label:   session.CurrentModel,
@@ -141,14 +152,16 @@ func scanSession(s scanner) (domain.Session, error) {
 	}
 	session.BoundaryProfile = domain.ProfileID(boundaryProfile)
 	session.Status = domain.SessionStatus(status)
+	session.ProviderStatus = domain.ProviderRuntimeStatus(providerStatus)
 	return session, nil
 }
 
 func (s *Store) ListSessions(ctx context.Context) ([]domain.Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, title, folder_path, current_model, current_habitat, native_session_id, boundary_profile_id, resolved_boundary_settings, status, migration_generation, created_at, updated_at, last_opened_at
-		FROM sessions
-		ORDER BY last_opened_at DESC, updated_at DESC
+		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.boundary_profile_id, s.resolved_boundary_settings, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
+		FROM sessions s
+		LEFT JOIN provider_sessions ps ON ps.id = s.active_provider_session_id
+		ORDER BY s.last_opened_at DESC, s.updated_at DESC
 	`)
 	if err != nil {
 		return nil, err
@@ -170,9 +183,10 @@ func (s *Store) ListSessions(ctx context.Context) ([]domain.Session, error) {
 
 func (s *Store) GetSession(ctx context.Context, sessionID string) (domain.Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT id, title, folder_path, current_model, current_habitat, native_session_id, boundary_profile_id, resolved_boundary_settings, status, migration_generation, created_at, updated_at, last_opened_at
-		FROM sessions
-		WHERE id = ?
+		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.boundary_profile_id, s.resolved_boundary_settings, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
+		FROM sessions s
+		LEFT JOIN provider_sessions ps ON ps.id = s.active_provider_session_id
+		WHERE s.id = ?
 	`, sessionID)
 	return scanSession(row)
 }
@@ -187,6 +201,7 @@ func (s *Store) CreateSession(ctx context.Context, draft domain.SessionDraft, ha
 		CurrentModel:             draft.Model,
 		ModelDescriptor:          domain.ModelDescriptor{ID: draft.Model, Label: draft.Model, Habitat: habitat},
 		CurrentHabitat:           habitat,
+		RuntimeKind:              domain.SessionRuntimeKindProviderSession,
 		BoundaryProfile:          domain.ProfileID(draft.BoundaryProfile),
 		ResolvedBoundarySettings: resolution.NativeSettings,
 		Status:                   domain.SessionStatusIdle,
@@ -199,9 +214,9 @@ func (s *Store) CreateSession(ctx context.Context, draft domain.SessionDraft, ha
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, title, folder_path, current_model, current_habitat, native_session_id, boundary_profile_id, resolved_boundary_settings, status, migration_generation, created_at, updated_at, last_opened_at)
-		VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, 0, ?, ?, ?)
-	`, session.ID, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.CreatedAt, session.UpdatedAt, session.LastOpenedAt)
+		INSERT INTO sessions (id, title, folder_path, current_model, current_habitat, runtime_kind, active_provider_session_id, native_session_id, boundary_profile_id, resolved_boundary_settings, status, migration_generation, created_at, updated_at, last_opened_at)
+		VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, 0, ?, ?, ?)
+	`, session.ID, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.CreatedAt, session.UpdatedAt, session.LastOpenedAt)
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -239,9 +254,9 @@ func (s *Store) UpdateSession(ctx context.Context, session domain.Session) error
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sessions
-		SET title = ?, folder_path = ?, current_model = ?, current_habitat = ?, native_session_id = ?, boundary_profile_id = ?, resolved_boundary_settings = ?, status = ?, migration_generation = ?, updated_at = ?, last_opened_at = ?
+		SET title = ?, folder_path = ?, current_model = ?, current_habitat = ?, runtime_kind = ?, active_provider_session_id = ?, native_session_id = ?, boundary_profile_id = ?, resolved_boundary_settings = ?, status = ?, migration_generation = ?, updated_at = ?, last_opened_at = ?
 		WHERE id = ?
-	`, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), session.NativeSessionID, string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.MigrationGeneration, now, now, session.ID)
+	`, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), session.ActiveProviderSessionID, session.NativeSessionID, string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.MigrationGeneration, now, now, session.ID)
 	return err
 }
 
@@ -574,4 +589,323 @@ func (s *Store) UpsertEcosystemSnapshot(ctx context.Context, health domain.Habit
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, string(health.Habitat), health.Installed, health.Authenticated, health.Version, string(modelsJSON), string(warningsJSON), health.ConfigPathHint, health.BoundaryBehavior, health.LastProbeAt.UTC())
 	return err
+}
+
+func (s *Store) backfillProviderSessions(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, current_habitat, native_session_id, runtime_kind, active_provider_session_id, created_at, updated_at
+		FROM sessions
+	`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+
+	type row struct {
+		sessionID   string
+		provider    string
+		nativeID    string
+		runtimeKind string
+		activeRefID string
+		createdAt   time.Time
+		updatedAt   time.Time
+	}
+	var items []row
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.sessionID, &item.provider, &item.nativeID, &item.runtimeKind, &item.activeRefID, &item.createdAt, &item.updatedAt); err != nil {
+			return err
+		}
+		if strings.TrimSpace(item.activeRefID) == "" && strings.TrimSpace(item.nativeID) != "" {
+			items = append(items, item)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		ref := domain.ProviderSessionRef{
+			ID:                uuid.NewString(),
+			SessionID:         item.sessionID,
+			Provider:          domain.Habitat(item.provider),
+			RuntimeKind:       domain.SessionRuntimeKind(item.runtimeKind),
+			ProviderSessionID: item.nativeID,
+			ProviderThreadID:  item.nativeID,
+			Status:            domain.ProviderRuntimeStatusReady,
+			StartedAt:         item.createdAt,
+			UpdatedAt:         item.updatedAt,
+		}
+		if err := s.UpsertProviderSession(ctx, ref); err != nil {
+			return err
+		}
+		if err := s.SetActiveProviderSession(ctx, item.sessionID, ref.ID, item.nativeID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) SetActiveProviderSession(ctx context.Context, sessionID, providerSessionRefID, nativeSessionID string) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE sessions
+		SET active_provider_session_id = ?, native_session_id = ?, updated_at = ?, last_opened_at = ?
+		WHERE id = ?
+	`, providerSessionRefID, nativeSessionID, time.Now().UTC(), time.Now().UTC(), sessionID)
+	return err
+}
+
+func (s *Store) GetProviderSessionByID(ctx context.Context, id string) (domain.ProviderSessionRef, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, provider, runtime_kind, provider_session_id, provider_thread_id, resume_cursor_json, status, last_error, created_at, updated_at, closed_at
+		FROM provider_sessions
+		WHERE id = ?
+	`, id)
+	return scanProviderSession(row)
+}
+
+func (s *Store) GetProviderSessionBySession(ctx context.Context, sessionID string, kind domain.SessionRuntimeKind) (domain.ProviderSessionRef, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, provider, runtime_kind, provider_session_id, provider_thread_id, resume_cursor_json, status, last_error, created_at, updated_at, closed_at
+		FROM provider_sessions
+		WHERE session_id = ? AND runtime_kind = ?
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT 1
+	`, sessionID, string(kind))
+	return scanProviderSession(row)
+}
+
+func (s *Store) ListProviderSessions(ctx context.Context) ([]domain.ProviderSessionRef, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, provider, runtime_kind, provider_session_id, provider_thread_id, resume_cursor_json, status, last_error, created_at, updated_at, closed_at
+		FROM provider_sessions
+		ORDER BY updated_at DESC
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.ProviderSessionRef
+	for rows.Next() {
+		item, err := scanProviderSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpsertProviderSession(ctx context.Context, ref domain.ProviderSessionRef) error {
+	now := time.Now().UTC()
+	if ref.ID == "" {
+		ref.ID = uuid.NewString()
+	}
+	if ref.StartedAt.IsZero() {
+		ref.StartedAt = now
+	}
+	ref.UpdatedAt = now
+	var closedAt any
+	if !ref.ClosedAt.IsZero() {
+		closedAt = ref.ClosedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO provider_sessions (id, session_id, provider, runtime_kind, provider_session_id, provider_thread_id, resume_cursor_json, status, last_error, created_at, updated_at, closed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			session_id = excluded.session_id,
+			provider = excluded.provider,
+			runtime_kind = excluded.runtime_kind,
+			provider_session_id = excluded.provider_session_id,
+			provider_thread_id = excluded.provider_thread_id,
+			resume_cursor_json = excluded.resume_cursor_json,
+			status = excluded.status,
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at,
+			closed_at = excluded.closed_at
+	`, ref.ID, ref.SessionID, string(ref.Provider), string(ref.RuntimeKind), ref.ProviderSessionID, ref.ProviderThreadID, ref.ProviderResumeCursorJSON, string(ref.Status), ref.LastError, ref.StartedAt, ref.UpdatedAt, closedAt)
+	return err
+}
+
+func (s *Store) UpsertProviderProcessState(ctx context.Context, state domain.ProviderProcessState) error {
+	now := time.Now().UTC()
+	if state.ID == "" {
+		state.ID = uuid.NewString()
+	}
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = now
+	}
+	state.UpdatedAt = now
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO provider_runtime_processes (id, provider_session_id, transport, warm, pid, connected, metadata_json, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			provider_session_id = excluded.provider_session_id,
+			transport = excluded.transport,
+			warm = excluded.warm,
+			pid = excluded.pid,
+			connected = excluded.connected,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at
+	`, state.ID, state.ProviderSessionID, state.Transport, boolToInt(state.Warm), state.PID, boolToInt(state.Connected), state.MetadataJSON, state.CreatedAt, state.UpdatedAt)
+	return err
+}
+
+func (s *Store) UpsertTerminalFeatureSession(ctx context.Context, feature domain.TerminalFeatureSession) error {
+	now := time.Now().UTC()
+	if feature.ID == "" {
+		feature.ID = uuid.NewString()
+	}
+	if feature.CreatedAt.IsZero() {
+		feature.CreatedAt = now
+	}
+	feature.UpdatedAt = now
+	var closedAt any
+	if !feature.ClosedAt.IsZero() {
+		closedAt = feature.ClosedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO terminal_feature_sessions (id, session_id, provider, feature_key, terminal_session_id, status, metadata_json, created_at, updated_at, closed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			session_id = excluded.session_id,
+			provider = excluded.provider,
+			feature_key = excluded.feature_key,
+			terminal_session_id = excluded.terminal_session_id,
+			status = excluded.status,
+			metadata_json = excluded.metadata_json,
+			updated_at = excluded.updated_at,
+			closed_at = excluded.closed_at
+	`, feature.ID, feature.SessionID, string(feature.Provider), feature.FeatureKey, feature.TerminalSessionID, string(feature.Status), feature.MetadataJSON, feature.CreatedAt, feature.UpdatedAt, closedAt)
+	return err
+}
+
+func (s *Store) GetTerminalFeatureSessionByID(ctx context.Context, id string) (domain.TerminalFeatureSession, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, provider, feature_key, terminal_session_id, status, metadata_json, created_at, updated_at, closed_at
+		FROM terminal_feature_sessions
+		WHERE id = ?
+	`, id)
+	return scanTerminalFeatureSession(row)
+}
+
+func (s *Store) GetTerminalFeatureSessionByFeature(ctx context.Context, sessionID, featureKey string) (domain.TerminalFeatureSession, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, provider, feature_key, terminal_session_id, status, metadata_json, created_at, updated_at, closed_at
+		FROM terminal_feature_sessions
+		WHERE session_id = ? AND feature_key = ?
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT 1
+	`, sessionID, featureKey)
+	return scanTerminalFeatureSession(row)
+}
+
+func (s *Store) UpsertSessionTask(ctx context.Context, task domain.SessionTask) error {
+	now := time.Now().UTC()
+	if task.ID == "" {
+		task.ID = uuid.NewString()
+	}
+	if task.CreatedAt.IsZero() {
+		task.CreatedAt = now
+	}
+	task.UpdatedAt = now
+	var closedAt any
+	if !task.ClosedAt.IsZero() {
+		closedAt = task.ClosedAt
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO session_tasks (id, session_id, provider_task_id, source, provider, title, detail, status, created_at, updated_at, closed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			session_id = excluded.session_id,
+			provider_task_id = excluded.provider_task_id,
+			source = excluded.source,
+			provider = excluded.provider,
+			title = excluded.title,
+			detail = excluded.detail,
+			status = excluded.status,
+			updated_at = excluded.updated_at,
+			closed_at = excluded.closed_at
+	`, task.ID, task.SessionID, task.ProviderTaskID, string(task.Source), string(task.Provider), task.Title, task.Detail, task.Status, task.CreatedAt, task.UpdatedAt, closedAt)
+	return err
+}
+
+func (s *Store) GetSessionTaskByProviderTaskID(ctx context.Context, sessionID, providerTaskID string) (domain.SessionTask, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT id, session_id, provider_task_id, source, provider, title, detail, status, created_at, updated_at, closed_at
+		FROM session_tasks
+		WHERE session_id = ? AND provider_task_id = ?
+		ORDER BY updated_at DESC, created_at DESC
+		LIMIT 1
+	`, sessionID, providerTaskID)
+	return scanSessionTask(row)
+}
+
+func (s *Store) ListSessionTasks(ctx context.Context, sessionID string) ([]domain.SessionTask, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, session_id, provider_task_id, source, provider, title, detail, status, created_at, updated_at, closed_at
+		FROM session_tasks
+		WHERE session_id = ?
+		ORDER BY updated_at DESC, created_at DESC
+	`, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []domain.SessionTask
+	for rows.Next() {
+		item, err := scanSessionTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func scanProviderSession(s scanner) (domain.ProviderSessionRef, error) {
+	var ref domain.ProviderSessionRef
+	var provider, runtimeKind, status string
+	var closedAt sql.NullTime
+	if err := s.Scan(&ref.ID, &ref.SessionID, &provider, &runtimeKind, &ref.ProviderSessionID, &ref.ProviderThreadID, &ref.ProviderResumeCursorJSON, &status, &ref.LastError, &ref.StartedAt, &ref.UpdatedAt, &closedAt); err != nil {
+		return domain.ProviderSessionRef{}, err
+	}
+	ref.Provider = domain.Habitat(provider)
+	ref.RuntimeKind = domain.SessionRuntimeKind(runtimeKind)
+	ref.Status = domain.ProviderRuntimeStatus(status)
+	if closedAt.Valid {
+		ref.ClosedAt = closedAt.Time
+	}
+	return ref, nil
+}
+
+func scanTerminalFeatureSession(s scanner) (domain.TerminalFeatureSession, error) {
+	var item domain.TerminalFeatureSession
+	var provider, status string
+	var closedAt sql.NullTime
+	if err := s.Scan(&item.ID, &item.SessionID, &provider, &item.FeatureKey, &item.TerminalSessionID, &status, &item.MetadataJSON, &item.CreatedAt, &item.UpdatedAt, &closedAt); err != nil {
+		return domain.TerminalFeatureSession{}, err
+	}
+	item.Provider = domain.Habitat(provider)
+	item.Status = domain.ProviderRuntimeStatus(status)
+	if closedAt.Valid {
+		item.ClosedAt = closedAt.Time
+	}
+	return item, nil
+}
+
+func scanSessionTask(s scanner) (domain.SessionTask, error) {
+	var item domain.SessionTask
+	var source, provider string
+	var closedAt sql.NullTime
+	if err := s.Scan(&item.ID, &item.SessionID, &item.ProviderTaskID, &source, &provider, &item.Title, &item.Detail, &item.Status, &item.CreatedAt, &item.UpdatedAt, &closedAt); err != nil {
+		return domain.SessionTask{}, err
+	}
+	item.Source = domain.TaskSource(source)
+	item.Provider = domain.Habitat(provider)
+	if closedAt.Valid {
+		item.ClosedAt = closedAt.Time
+	}
+	return item, nil
 }

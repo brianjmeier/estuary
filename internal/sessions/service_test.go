@@ -49,6 +49,16 @@ func TestCreateSessionPersistsAndWarnsOnDuplicateFolder(t *testing.T) {
 	if resolution.Compatibility != domain.BoundaryCompatibilityExact {
 		t.Fatalf("expected exact codex mapping, got %s", resolution.Compatibility)
 	}
+	ref, err := st.GetProviderSessionBySession(ctx, first.ID, domain.SessionRuntimeKindProviderSession)
+	if err != nil {
+		t.Fatalf("provider session: %v", err)
+	}
+	if ref.Provider != domain.HabitatCodex {
+		t.Fatalf("expected codex provider session, got %s", ref.Provider)
+	}
+	if ref.Status != domain.ProviderRuntimeStatusConnecting {
+		t.Fatalf("expected connecting provider status, got %s", ref.Status)
+	}
 
 	_, _, duplicates, err = svc.Create(ctx, domain.SessionDraft{
 		FolderPath:      projectDir,

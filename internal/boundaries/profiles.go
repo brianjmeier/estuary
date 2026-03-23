@@ -31,7 +31,7 @@ func DefaultProfiles() []domain.BoundaryProfile {
 		},
 		{
 			ID:                ProfileWorkspaceWrite,
-			Name:              "Workspace Write",
+			Name:              "Controlled",
 			Description:       "Normal work inside the selected folder, approval for broader access.",
 			PolicyLevel:       domain.PolicyLevelBalanced,
 			FileAccessPolicy:  domain.FileAccessWorkspaceWrite,
@@ -39,7 +39,7 @@ func DefaultProfiles() []domain.BoundaryProfile {
 			NetworkToolPolicy: domain.NetworkApprovalRequired,
 			DefaultApproval:   domain.ApprovalOnRequest,
 			HabitatOverrideJSON: mustJSON(map[string]map[string]string{
-				"claude": {"permission_mode": "acceptEdits"},
+				"claude": {"permission_mode": "default"},
 				"codex":  {"approval_policy": "on-request", "sandbox_mode": "workspace-write"},
 			}),
 		},
@@ -59,7 +59,7 @@ func DefaultProfiles() []domain.BoundaryProfile {
 		},
 		{
 			ID:                ProfileFullAccess,
-			Name:              "Full Access",
+			Name:              "Unrestricted",
 			Description:       "No approvals. Clearly marked unsafe.",
 			PolicyLevel:       domain.PolicyLevelUnsafe,
 			FileAccessPolicy:  domain.FileAccessFull,

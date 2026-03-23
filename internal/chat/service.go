@@ -7,13 +7,13 @@ import (
 	"time"
 
 	"github.com/brianmeier/estuary/internal/domain"
-	"github.com/brianmeier/estuary/internal/habitats"
+	"github.com/brianmeier/estuary/internal/providers"
 	"github.com/brianmeier/estuary/internal/store"
 )
 
 type Service struct {
 	store   *store.Store
-	runtime *habitats.Runtime
+	manager *providers.SessionManager
 }
 
 type StreamEnvelope struct {
@@ -24,8 +24,12 @@ type StreamEnvelope struct {
 	Done     bool
 }
 
-func NewService(store *store.Store, runtime *habitats.Runtime) *Service {
-	return &Service{store: store, runtime: runtime}
+func NewService(store *store.Store, manager *providers.SessionManager) *Service {
+	return &Service{store: store, manager: manager}
+}
+
+func (s *Service) ReconnectSession(ctx context.Context, sessionID string) error {
+	return s.manager.CloseSession(ctx, sessionID)
 }
 
 func (s *Service) List(ctx context.Context, sessionID string) ([]domain.Message, error) {
@@ -46,6 +50,7 @@ func (s *Service) MarkResumeRequested(ctx context.Context, session domain.Sessio
 	return s.store.AppendEvent(ctx, session.ID, "session.resumed", map[string]any{
 		"mode":              "explicit",
 		"native_session_id": session.NativeSessionID,
+		"provider_session":  session.ActiveProviderSessionID,
 	})
 }
 
@@ -110,7 +115,7 @@ func (s *Service) SendStream(ctx context.Context, session domain.Session, prompt
 
 	var assistantText strings.Builder
 	nativeID := session.NativeSessionID
-	err = s.runtime.ExecuteTurnStream(ctx, session, finalPrompt, func(event domain.TurnEvent) error {
+	ref, err := s.manager.SendTurn(ctx, session, finalPrompt, func(event domain.TurnEvent) error {
 		event.SessionID = session.ID
 		if strings.TrimSpace(event.NativeSessionID) != "" {
 			nativeID = event.NativeSessionID
@@ -127,6 +132,9 @@ func (s *Service) SendStream(ctx context.Context, session domain.Session, prompt
 			_ = s.store.AppendEvent(ctx, session.ID, "tool.finished", map[string]any{"tool": event.ToolName, "text": event.Text})
 		case domain.TurnEventNotice:
 			_ = s.store.AppendEvent(ctx, session.ID, "notice", map[string]any{"text": event.Text})
+		case domain.TurnEventTaskStarted, domain.TurnEventTaskProgress, domain.TurnEventTaskComplete:
+			_ = s.persistTaskEvent(ctx, session, event)
+			_ = s.store.AppendEvent(ctx, session.ID, string(event.Kind), map[string]any{"task_id": event.TaskID, "title": event.TaskTitle, "detail": event.TaskDetail, "status": event.TaskStatus})
 		case domain.TurnEventHabitatError:
 			_ = s.store.AppendEvent(ctx, session.ID, "habitat.error", map[string]any{"text": event.Text, "native_session_id": event.NativeSessionID, "metadata": event.Metadata})
 		case domain.TurnEventCompleted:
@@ -137,7 +145,12 @@ func (s *Service) SendStream(ctx context.Context, session domain.Session, prompt
 		}
 		return nil
 	})
-
+	if ref.ID != "" {
+		session.ActiveProviderSessionID = ref.ID
+		session.ProviderStatus = ref.Status
+		session.NativeSessionID = firstNonEmpty(ref.ProviderSessionID, ref.ProviderThreadID, nativeID)
+		nativeID = session.NativeSessionID
+	}
 	if err != nil && session.NativeSessionID != "" && resumeRejected(err) {
 		return s.retryWithoutNativeResume(ctx, session, state, prompt, persisted, emit, err)
 	}
@@ -169,7 +182,7 @@ func (s *Service) retryWithoutNativeResume(ctx context.Context, session domain.S
 
 	var assistantText strings.Builder
 	nativeID := ""
-	err = s.runtime.ExecuteTurnStream(ctx, session, prompt, func(event domain.TurnEvent) error {
+	ref, err := s.manager.SendTurn(ctx, session, prompt, func(event domain.TurnEvent) error {
 		if strings.TrimSpace(event.NativeSessionID) != "" {
 			nativeID = event.NativeSessionID
 		}
@@ -185,6 +198,9 @@ func (s *Service) retryWithoutNativeResume(ctx context.Context, session domain.S
 			_ = s.store.AppendEvent(ctx, session.ID, "tool.finished", map[string]any{"tool": event.ToolName, "text": event.Text})
 		case domain.TurnEventNotice:
 			_ = s.store.AppendEvent(ctx, session.ID, "notice", map[string]any{"text": event.Text})
+		case domain.TurnEventTaskStarted, domain.TurnEventTaskProgress, domain.TurnEventTaskComplete:
+			_ = s.persistTaskEvent(ctx, session, event)
+			_ = s.store.AppendEvent(ctx, session.ID, string(event.Kind), map[string]any{"task_id": event.TaskID, "title": event.TaskTitle, "detail": event.TaskDetail, "status": event.TaskStatus})
 		case domain.TurnEventHabitatError:
 			_ = s.store.AppendEvent(ctx, session.ID, "habitat.error", map[string]any{"text": event.Text, "native_session_id": event.NativeSessionID, "metadata": event.Metadata})
 		}
@@ -193,6 +209,10 @@ func (s *Service) retryWithoutNativeResume(ctx context.Context, session domain.S
 		}
 		return nil
 	})
+	if ref.ID != "" {
+		session.ActiveProviderSessionID = ref.ID
+		session.ProviderStatus = ref.Status
+	}
 	return s.finishTurn(ctx, session, state, persisted, assistantText.String(), err, nativeID, emit)
 }
 
@@ -244,12 +264,16 @@ func (s *Service) finishTurn(ctx context.Context, session domain.Session, state 
 	if err != nil {
 		return err
 	}
+	fullMessages, err := s.store.ListMessages(ctx, session.ID)
+	if err != nil {
+		return err
+	}
 
 	if emit != nil {
 		if err := emit(StreamEnvelope{
 			Event:    domain.TurnEvent{Kind: domain.TurnEventCompleted, SessionID: session.ID, NativeSessionID: nativeID, Text: strings.TrimSpace(assistantText)},
 			Session:  updatedSession,
-			Messages: messages,
+			Messages: fullMessages,
 			Err:      runErr,
 			Done:     true,
 		}); err != nil {
@@ -274,9 +298,40 @@ func resumeRejected(err error) bool {
 	return strings.Contains(text, "resume") && (strings.Contains(text, "not found") || strings.Contains(text, "invalid") || strings.Contains(text, "expired"))
 }
 
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
+}
+
 func fallbackResumeStatus(value, fallback string) string {
 	if strings.TrimSpace(value) == "" {
 		return fallback
 	}
 	return value
+}
+
+func (s *Service) persistTaskEvent(ctx context.Context, session domain.Session, event domain.TurnEvent) error {
+	if strings.TrimSpace(event.TaskID) == "" {
+		return nil
+	}
+	task, err := s.store.GetSessionTaskByProviderTaskID(ctx, session.ID, event.TaskID)
+	if err != nil {
+		task = domain.SessionTask{
+			SessionID:      session.ID,
+			ProviderTaskID: event.TaskID,
+			Source:         domain.TaskSourceProvider,
+			Provider:       session.CurrentHabitat,
+		}
+	}
+	task.Title = firstNonEmpty(event.TaskTitle, task.Title, event.TaskID)
+	task.Detail = firstNonEmpty(event.TaskDetail, task.Detail)
+	task.Status = firstNonEmpty(event.TaskStatus, task.Status, "running")
+	if event.Kind == domain.TurnEventTaskComplete {
+		task.ClosedAt = time.Now().UTC()
+	}
+	return s.store.UpsertSessionTask(ctx, task)
 }

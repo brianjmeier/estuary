@@ -17,6 +17,24 @@ const (
 	SessionStatusError  SessionStatus = "error"
 )
 
+type SessionRuntimeKind string
+
+const (
+	SessionRuntimeKindProviderSession  SessionRuntimeKind = "provider_session"
+	SessionRuntimeKindProviderTerminal SessionRuntimeKind = "provider_terminal"
+)
+
+type ProviderRuntimeStatus string
+
+const (
+	ProviderRuntimeStatusConnecting ProviderRuntimeStatus = "connecting"
+	ProviderRuntimeStatusReady      ProviderRuntimeStatus = "ready"
+	ProviderRuntimeStatusRunning    ProviderRuntimeStatus = "running"
+	ProviderRuntimeStatusDegraded   ProviderRuntimeStatus = "degraded"
+	ProviderRuntimeStatusError      ProviderRuntimeStatus = "error"
+	ProviderRuntimeStatusClosed     ProviderRuntimeStatus = "closed"
+)
+
 type MessageRole string
 
 const (
@@ -85,6 +103,9 @@ type Session struct {
 	CurrentModel             string
 	ModelDescriptor          ModelDescriptor
 	CurrentHabitat           Habitat
+	RuntimeKind              SessionRuntimeKind
+	ActiveProviderSessionID  string
+	ProviderStatus           ProviderRuntimeStatus
 	NativeSessionID          string
 	BoundaryProfile          ProfileID
 	ResolvedBoundarySettings string
@@ -113,6 +134,49 @@ type RuntimeEvent struct {
 	CreatedAt time.Time
 }
 
+type ProviderSessionRef struct {
+	ID                       string
+	SessionID                string
+	Provider                 Habitat
+	RuntimeKind              SessionRuntimeKind
+	ProviderSessionID        string
+	ProviderThreadID         string
+	ProviderResumeCursorJSON string
+	Status                   ProviderRuntimeStatus
+	LastError                string
+	StartedAt                time.Time
+	UpdatedAt                time.Time
+	ClosedAt                 time.Time
+}
+
+type ProviderProcessState struct {
+	ID                string
+	ProviderSessionID string
+	SessionID         string
+	Provider          Habitat
+	RuntimeKind       SessionRuntimeKind
+	Transport         string
+	Warm              bool
+	PID               int
+	Connected         bool
+	MetadataJSON      string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type TerminalFeatureSession struct {
+	ID                string
+	SessionID         string
+	Provider          Habitat
+	FeatureKey        string
+	TerminalSessionID string
+	Status            ProviderRuntimeStatus
+	MetadataJSON      string
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	ClosedAt          time.Time
+}
+
 type SessionRuntimeState struct {
 	Active              bool      `json:"active"`
 	ResumeExplicit      bool      `json:"resume_explicit"`
@@ -122,29 +186,71 @@ type SessionRuntimeState struct {
 	PendingCheckpointID string    `json:"pending_checkpoint_id"`
 	ActiveTraitIDs      []string  `json:"active_trait_ids"`
 	FirstRunCompleted   bool      `json:"first_run_completed"`
+	VerboseOutput       bool      `json:"verbose_output"`
+	AutoAcceptEdits     bool      `json:"auto_accept_edits"`
+	StashedPrompt       string    `json:"stashed_prompt"`
 }
 
 type TurnEventKind string
 
 const (
-	TurnEventStarted      TurnEventKind = "turn.started"
-	TurnEventDelta        TurnEventKind = "assistant.delta"
-	TurnEventToolStarted  TurnEventKind = "tool.started"
-	TurnEventToolOutput   TurnEventKind = "tool.output"
-	TurnEventToolFinished TurnEventKind = "tool.finished"
-	TurnEventNotice       TurnEventKind = "notice"
-	TurnEventCompleted    TurnEventKind = "turn.completed"
-	TurnEventHabitatError TurnEventKind = "habitat.error"
+	TurnEventStarted       TurnEventKind = "turn.started"
+	TurnEventDelta         TurnEventKind = "assistant.delta"
+	TurnEventToolStarted   TurnEventKind = "tool.started"
+	TurnEventToolOutput    TurnEventKind = "tool.output"
+	TurnEventToolFinished  TurnEventKind = "tool.finished"
+	TurnEventNotice        TurnEventKind = "notice"
+	TurnEventCompleted     TurnEventKind = "turn.completed"
+	TurnEventHabitatError  TurnEventKind = "habitat.error"
+	TurnEventTaskStarted   TurnEventKind = "task.started"
+	TurnEventTaskProgress  TurnEventKind = "task.progress"
+	TurnEventTaskComplete  TurnEventKind = "task.completed"
+	TurnEventShellStarted  TurnEventKind = "shell.started"
+	TurnEventShellOutput   TurnEventKind = "shell.output"
+	TurnEventShellComplete TurnEventKind = "shell.completed"
 )
 
 type TurnEvent struct {
 	Kind            TurnEventKind
 	SessionID       string
+	TurnID          string
 	NativeSessionID string
 	Text            string
 	ToolName        string
+	TaskID          string
+	TaskStatus      string
+	TaskTitle       string
+	TaskDetail      string
 	Metadata        map[string]string
 	Err             error
+}
+
+type ComposeMode string
+
+const (
+	ComposeModeChat  ComposeMode = "chat"
+	ComposeModeShell ComposeMode = "shell"
+)
+
+type TaskSource string
+
+const (
+	TaskSourceProvider TaskSource = "provider"
+	TaskSourceApp      TaskSource = "app"
+)
+
+type SessionTask struct {
+	ID             string
+	SessionID      string
+	ProviderTaskID string
+	Source         TaskSource
+	Provider       Habitat
+	Title          string
+	Detail         string
+	Status         string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+	ClosedAt       time.Time
 }
 
 type MigrationCheckpoint struct {

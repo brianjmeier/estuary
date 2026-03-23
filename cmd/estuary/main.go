@@ -41,7 +41,11 @@ func main() {
 		log.Fatalf("create app model: %v", err)
 	}
 
-	p := tea.NewProgram(m)
+	p := tea.NewProgram(
+		m,
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
+	)
 	if _, err := p.Run(); err != nil {
 		log.Printf("estuary exited with error: %v", err)
 		os.Exit(1)

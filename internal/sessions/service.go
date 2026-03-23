@@ -6,6 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/domain"
@@ -87,6 +90,23 @@ func (s *Service) Create(ctx context.Context, draft domain.SessionDraft, profile
 	if err := s.store.SaveSessionRuntimeState(ctx, session.ID, domain.SessionRuntimeState{Active: true, FirstRunCompleted: true}); err != nil {
 		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
 	}
+	providerRef := domain.ProviderSessionRef{
+		ID:          uuid.NewString(),
+		SessionID:   session.ID,
+		Provider:    habitat,
+		RuntimeKind: domain.SessionRuntimeKindProviderSession,
+		Status:      domain.ProviderRuntimeStatusConnecting,
+		StartedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}
+	if err := s.store.UpsertProviderSession(ctx, providerRef); err != nil {
+		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+	}
+	if err := s.store.SetActiveProviderSession(ctx, session.ID, providerRef.ID, ""); err != nil {
+		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+	}
+	session.ActiveProviderSessionID = providerRef.ID
+	session.ProviderStatus = providerRef.Status
 
 	return session, resolution, existingCount, nil
 }
