@@ -2,6 +2,7 @@
 .nix-go/
 .nix-gocache/
 .nix-npm-cache/
+node_modules/
 bin/
 dist/
 result
