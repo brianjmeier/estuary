@@ -45,57 +45,6 @@ const (
 	MessageRoleSummary   MessageRole = "summary"
 )
 
-type BoundaryCompatibility string
-
-const (
-	BoundaryCompatibilityExact        BoundaryCompatibility = "exact"
-	BoundaryCompatibilityApproximated BoundaryCompatibility = "approximated"
-	BoundaryCompatibilityUnsupported  BoundaryCompatibility = "unsupported"
-)
-
-type ProfileID string
-
-type PolicyLevel string
-
-const (
-	PolicyLevelStrict   PolicyLevel = "strict"
-	PolicyLevelBalanced PolicyLevel = "balanced"
-	PolicyLevelUnsafe   PolicyLevel = "unsafe"
-)
-
-type FileAccessPolicy string
-
-const (
-	FileAccessWorkspaceRead  FileAccessPolicy = "workspace-read"
-	FileAccessWorkspaceWrite FileAccessPolicy = "workspace-write"
-	FileAccessReadOnly       FileAccessPolicy = "read-only"
-	FileAccessFull           FileAccessPolicy = "full-access"
-)
-
-type CommandPolicy string
-
-const (
-	CommandApprovalRequired CommandPolicy = "approval-required"
-	CommandWorkspaceSafe    CommandPolicy = "workspace-safe"
-	CommandReadOnly         CommandPolicy = "read-only"
-	CommandFullAccess       CommandPolicy = "full-access"
-)
-
-type NetworkPolicy string
-
-const (
-	NetworkApprovalRequired NetworkPolicy = "approval-required"
-	NetworkEnabled          NetworkPolicy = "enabled"
-)
-
-type ApprovalBehavior string
-
-const (
-	ApprovalAlways    ApprovalBehavior = "always"
-	ApprovalOnRequest ApprovalBehavior = "on-request"
-	ApprovalNever     ApprovalBehavior = "never"
-)
-
 type Session struct {
 	ID                       string
 	Title                    string
@@ -107,8 +56,6 @@ type Session struct {
 	ActiveProviderSessionID  string
 	ProviderStatus           ProviderRuntimeStatus
 	NativeSessionID          string
-	BoundaryProfile          ProfileID
-	ResolvedBoundarySettings string
 	Status                   SessionStatus
 	MigrationGeneration      int
 	CreatedAt                time.Time
@@ -299,38 +246,15 @@ type Trait struct {
 	UpdatedAt      time.Time
 }
 
-type BoundaryProfile struct {
-	ID                  ProfileID
-	Name                string
-	Description         string
-	PolicyLevel         PolicyLevel
-	FileAccessPolicy    FileAccessPolicy
-	CommandExecution    CommandPolicy
-	NetworkToolPolicy   NetworkPolicy
-	DefaultApproval     ApprovalBehavior
-	HabitatOverrideJSON string
-	CompatibilityNotes  string
-	Unsafe              bool
-}
-
-type BoundaryResolution struct {
-	ProfileID      ProfileID
-	Habitat        Habitat
-	Compatibility  BoundaryCompatibility
-	Summary        string
-	NativeSettings string
-}
-
 type HabitatHealth struct {
 	Habitat          Habitat
 	Installed        bool
 	Authenticated    bool
 	Version          string
-	AvailableModels  []string
-	LastProbeAt      time.Time
-	Warnings         []string
-	ConfigPathHint   string
-	BoundaryBehavior string
+	AvailableModels []string
+	LastProbeAt     time.Time
+	Warnings        []string
+	ConfigPathHint  string
 }
 
 type ModelDescriptor struct {
@@ -345,7 +269,54 @@ type AppSettings struct {
 }
 
 type SessionDraft struct {
-	FolderPath      string
-	Model           string
-	BoundaryProfile string
+	FolderPath string
+	Model      string
+}
+
+type SwitchType string
+
+const (
+	SwitchTypeSameProvider  SwitchType = "same_provider"
+	SwitchTypeCrossProvider SwitchType = "cross_provider"
+	SwitchTypeRestore       SwitchType = "restore"
+	SwitchTypeFresh         SwitchType = "fresh"
+)
+
+type AttachStrategy string
+
+const (
+	AttachStrategyFresh   AttachStrategy = "fresh"
+	AttachStrategyResume  AttachStrategy = "resume"
+	AttachStrategyHandoff AttachStrategy = "handoff"
+)
+
+// HandoffPacket extends MigrationCheckpoint with fields needed for provider switching
+// and session restore in the native terminal model.
+type HandoffPacket struct {
+	MigrationCheckpoint
+
+	RecentWorkSummary string   `json:"recent_work_summary"`
+	FileReferences    []string `json:"file_references"`
+
+	SourceModel    string     `json:"source_model"`
+	SourceProvider Habitat    `json:"source_provider"`
+	TargetModel    string     `json:"target_model"`
+	TargetProvider Habitat    `json:"target_provider"`
+	SwitchType     SwitchType `json:"switch_type"`
+	UserNote       string     `json:"user_note"`
+}
+
+// TerminalSession tracks a live PTY-backed native provider session.
+type TerminalSession struct {
+	ID              string
+	SessionID       string
+	Provider        Habitat
+	PID             int
+	AttachStrategy  AttachStrategy
+	NativeSessionID string
+	HandoffPacketID string
+	Status          ProviderRuntimeStatus
+	StartedAt       time.Time
+	ExitedAt        time.Time
+	ExitCode        int
 }

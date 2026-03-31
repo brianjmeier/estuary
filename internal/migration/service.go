@@ -20,7 +20,9 @@ func NewService(st *store.Store) *Service {
 	return &Service{store: st}
 }
 
-func (s *Service) CreateCheckpoint(ctx context.Context, session domain.Session, activeTraits []domain.Trait) (domain.MigrationCheckpoint, error) {
+// BuildCheckpoint extracts context from the session's message history and
+// returns a populated checkpoint without writing it to the store.
+func (s *Service) BuildCheckpoint(ctx context.Context, session domain.Session, activeTraits []domain.Trait) (domain.MigrationCheckpoint, error) {
 	messages, err := s.store.ListMessages(ctx, session.ID)
 	if err != nil {
 		return domain.MigrationCheckpoint{}, err
@@ -30,7 +32,7 @@ func (s *Service) CreateCheckpoint(ctx context.Context, session domain.Session, 
 		return domain.MigrationCheckpoint{}, err
 	}
 
-	checkpoint := domain.MigrationCheckpoint{
+	return domain.MigrationCheckpoint{
 		ID:                  uuid.NewString(),
 		SessionID:           session.ID,
 		FolderPath:          session.FolderPath,
@@ -47,6 +49,13 @@ func (s *Service) CreateCheckpoint(ctx context.Context, session domain.Session, 
 			"recent_events":     summarizeEvents(events),
 		},
 		CreatedAt: time.Now().UTC(),
+	}, nil
+}
+
+func (s *Service) CreateCheckpoint(ctx context.Context, session domain.Session, activeTraits []domain.Trait) (domain.MigrationCheckpoint, error) {
+	checkpoint, err := s.BuildCheckpoint(ctx, session, activeTraits)
+	if err != nil {
+		return domain.MigrationCheckpoint{}, err
 	}
 	return checkpoint, s.store.CreateMigrationCheckpoint(ctx, checkpoint)
 }

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,7 +12,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/chat"
 	"github.com/brianmeier/estuary/internal/domain"
 	"github.com/brianmeier/estuary/internal/habitats"
@@ -40,7 +38,6 @@ const (
 	modalNone modalMode = iota
 	modalPalette
 	modalMigration
-	modalBoundary
 	modalTraitEditor
 	modalShortcuts
 	modalSlashPicker
@@ -66,7 +63,6 @@ type probeResultMsg struct {
 
 type sessionCreatedMsg struct {
 	Session       domain.Session
-	Resolution    domain.BoundaryResolution
 	ExistingCount int
 	Err           error
 }
@@ -135,10 +131,6 @@ type migrationState struct {
 	ModelIndex   int
 }
 
-type boundaryState struct {
-	ProfileIndex int
-}
-
 type pickerState struct {
 	Query     string
 	Selection int
@@ -175,7 +167,6 @@ type Model struct {
 	sessionList      []domain.Session
 	messages         []domain.Message
 	health           []domain.HabitatHealth
-	profiles         []domain.BoundaryProfile
 	traitList        []domain.Trait
 	runtimeStates    map[string]domain.SessionRuntimeState
 	streams          map[int]<-chan chat.StreamEnvelope
@@ -184,7 +175,6 @@ type Model struct {
 	compose          composeState
 	palette          paletteState
 	migrationUI      migrationState
-	boundaryUI       boundaryState
 	slashPicker      pickerState
 	filePicker       pickerState
 	traitEditor      traitEditorState
@@ -230,7 +220,6 @@ func NewModel(ctx context.Context, cwd string, st *store.Store, prober *prereq.P
 		settings:       settings,
 		center:         viewChat,
 		sessionList:    sessionList,
-		profiles:       boundaries.DefaultProfiles(),
 		runtimeStates:  map[string]domain.SessionRuntimeState{},
 		streams:        map[int]<-chan chat.StreamEnvelope{},
 		streamSessions: map[int]string{},
@@ -262,8 +251,8 @@ func (m Model) Init() tea.Cmd {
 		},
 		func() tea.Msg {
 			_ = m.store.MarkAllSessionsInactive(m.ctx)
-			session, resolution, count, err := m.sessions.CreateCurrent(m.ctx, m.cwd, m.profiles)
-			return sessionCreatedMsg{Session: session, Resolution: resolution, ExistingCount: count, Err: err}
+			session, count, err := m.sessions.CreateCurrent(m.ctx, m.cwd)
+			return sessionCreatedMsg{Session: session, ExistingCount: count, Err: err}
 		},
 	)
 }
@@ -364,8 +353,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handlePaletteKey(msg)
 		case modalMigration:
 			return m.handleMigrationKey(msg)
-		case modalBoundary:
-			return m.handleBoundaryKey(msg)
 		case modalTraitEditor:
 			return m.handleTraitEditorKey(msg)
 		case modalShortcuts:
@@ -743,26 +730,6 @@ func (m Model) handleMigrationKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m Model) handleBoundaryKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "esc":
-		m.modal = modalNone
-	case "up", "k":
-		m.boundaryUI.ProfileIndex = m.cycleIndex(m.boundaryUI.ProfileIndex-1, len(m.profiles))
-	case "down", "j":
-		m.boundaryUI.ProfileIndex = m.cycleIndex(m.boundaryUI.ProfileIndex+1, len(m.profiles))
-	case "enter":
-		session, ok := m.selectedSession()
-		if !ok {
-			return m, nil
-		}
-		profile := m.profiles[m.boundaryUI.ProfileIndex]
-		m.modal = modalNone
-		return m, func() tea.Msg { return m.performBoundaryChange(session, profile) }
-	}
-	return m, nil
-}
-
 func (m Model) handleTraitEditorKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "esc":
@@ -963,38 +930,11 @@ func (m Model) renderComposerMetaBar(width int) string {
 	muted := lipgloss.NewStyle().Foreground(m.theme.FGMuted)
 	parts := []string{
 		green.Render(m.displayModelName(session)),
-		m.boundaryLabel(session),
 	}
-	if state, ok := m.runtimeStates[session.ID]; ok && state.AutoAcceptEdits && session.CurrentHabitat == domain.HabitatClaude && session.BoundaryProfile != boundaries.ProfileFullAccess {
+	if state, ok := m.runtimeStates[session.ID]; ok && state.AutoAcceptEdits && session.CurrentHabitat == domain.HabitatClaude {
 		parts = append(parts, "Auto-accept edits")
 	}
 	return muted.Width(width).Render(strings.Join(parts, muted.Render("  ·  ")))
-}
-
-func (m Model) boundaryLabel(session domain.Session) string {
-	label := m.boundaryDisplayName(session.BoundaryProfile)
-	if session.ResolvedBoundarySettings == "" {
-		return label
-	}
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(session.ResolvedBoundarySettings), &settings); err != nil {
-		return label
-	}
-	if strings.EqualFold(settings["permission_mode"], "plan") {
-		return "Planning"
-	}
-	return label
-}
-
-func (m Model) boundaryDisplayName(id domain.ProfileID) string {
-	switch id {
-	case boundaries.ProfileWorkspaceWrite:
-		return "Controlled"
-	case boundaries.ProfileFullAccess:
-		return "Unrestricted"
-	default:
-		return string(id)
-	}
 }
 
 func (m Model) displayModelName(session domain.Session) string {
@@ -1128,7 +1068,6 @@ func (m Model) renderSettings() string {
 		"Current session",
 		fmt.Sprintf("Directory: %s", session.FolderPath),
 		fmt.Sprintf("Model: %s", session.CurrentModel),
-		fmt.Sprintf("Boundary: %s", session.BoundaryProfile),
 		fmt.Sprintf("Habitat: %s", session.CurrentHabitat),
 		"",
 		"Recent sessions",
@@ -1139,7 +1078,7 @@ func (m Model) renderSettings() string {
 		}
 		lines = append(lines, fmt.Sprintf("- %s [%s] %s", item.Title, item.CurrentModel, item.FolderPath))
 	}
-	lines = append(lines, "", "Use Ctrl+K to switch sessions, change model, change boundaries, or open traits.")
+	lines = append(lines, "", "Use Ctrl+K to switch sessions, change model, or open traits.")
 	return strings.Join(lines, "\n")
 }
 
@@ -1153,8 +1092,6 @@ func (m Model) renderModal(width int) string {
 		return m.renderPalette(width)
 	case modalMigration:
 		return m.renderMigration(width)
-	case modalBoundary:
-		return m.renderBoundary(width)
 	case modalTraitEditor:
 		return m.renderTraitEditor(width)
 	case modalShortcuts:
@@ -1314,22 +1251,6 @@ func (m Model) renderMigration(width int) string {
 	return panelStyle(m.theme, true).Width(width).Render(m.panelTitle("Change Model") + "\n" + strings.Join(lines, "\n"))
 }
 
-func (m Model) renderBoundary(width int) string {
-	profile := m.profiles[m.boundaryUI.ProfileIndex]
-	session, _ := m.selectedSession()
-	resolution := boundaries.Resolve(profile, session.CurrentHabitat)
-	lines := []string{
-		fmt.Sprintf("Profile: %s", profile.Name),
-		profile.Description,
-		fmt.Sprintf("Compatibility: %s", strings.ToUpper(string(resolution.Compatibility))),
-		"Summary: " + resolution.Summary,
-	}
-	if profile.Unsafe {
-		lines = append(lines, "Unsafe: yes")
-	}
-	return panelStyle(m.theme, true).Width(width).Render(m.panelTitle("Boundary") + "\n" + strings.Join(lines, "\n"))
-}
-
 func (m Model) renderTraitEditor(width int) string {
 	lines := []string{
 		m.renderTraitField("Name", m.traitEditor.Name, m.traitEditor.Field == traitName),
@@ -1366,7 +1287,6 @@ func (m Model) paletteEntries() []paletteEntry {
 		{Label: "New Session Here", Hint: m.cwd, Kind: "new"},
 		{Label: "Settings", Hint: "view configuration and recent sessions", Kind: "settings"},
 		{Label: "Change Model", Hint: "migration", Kind: "model"},
-		{Label: "Change Boundary", Hint: "workspace permissions", Kind: "boundary"},
 		{Label: "Traits", Hint: "shared commands and skills", Kind: "traits"},
 		{Label: "Re-probe Habitats", Hint: "refresh local Claude/Codex state", Kind: "probe"},
 		{Label: "Toggle Theme", Hint: m.theme.Name, Kind: "theme"},
@@ -1415,7 +1335,6 @@ func (m Model) filteredSlashEntries() []paletteEntry {
 	items := []paletteEntry{
 		{Label: "/help", Hint: "open shortcuts", Kind: "slash-help"},
 		{Label: "/model", Hint: "switch model", Kind: "slash-model"},
-		{Label: "/boundary", Hint: "change boundary", Kind: "slash-boundary"},
 		{Label: "/traits", Hint: "open traits", Kind: "slash-traits"},
 		{Label: "/theme", Hint: "toggle theme", Kind: "slash-theme"},
 		{Label: "/probe", Hint: "re-probe habitats", Kind: "slash-probe"},
@@ -1465,8 +1384,8 @@ func (m Model) executePaletteEntry(entry paletteEntry) (tea.Model, tea.Cmd) {
 	switch entry.Kind {
 	case "new":
 		return m, func() tea.Msg {
-			session, resolution, count, err := m.sessions.CreateCurrent(m.ctx, m.cwd, m.profiles)
-			return sessionCreatedMsg{Session: session, Resolution: resolution, ExistingCount: count, Err: err}
+			session, count, err := m.sessions.CreateCurrent(m.ctx, m.cwd)
+			return sessionCreatedMsg{Session: session, ExistingCount: count, Err: err}
 		}
 	case "settings":
 		m.center = viewSettings
@@ -1480,12 +1399,6 @@ func (m Model) executePaletteEntry(entry paletteEntry) (tea.Model, tea.Cmd) {
 		if session, ok := m.selectedSession(); ok {
 			m.migrationUI = migrationState{Model: session.CurrentModel, CurrentModel: session.CurrentModel, ModelIndex: m.indexForModel(session.CurrentModel)}
 			m.modal = modalMigration
-		}
-		return m, nil
-	case "boundary":
-		if session, ok := m.selectedSession(); ok {
-			m.boundaryUI.ProfileIndex = m.indexForProfile(session.BoundaryProfile)
-			m.modal = modalBoundary
 		}
 		return m, nil
 	case "traits":
@@ -1564,12 +1477,6 @@ func (m Model) applySlashEntry(entry paletteEntry) (tea.Model, tea.Cmd) {
 			m.modal = modalMigration
 		}
 		return m, nil
-	case "slash-boundary":
-		if session, ok := m.selectedSession(); ok {
-			m.boundaryUI.ProfileIndex = m.indexForProfile(session.BoundaryProfile)
-			m.modal = modalBoundary
-		}
-		return m, nil
 	case "slash-traits":
 		m.modal = modalTraitEditor
 		return m, nil
@@ -1644,28 +1551,19 @@ func (m Model) execShellCmd(session domain.Session, commandText string) tea.Cmd 
 
 func (m Model) toggleAutoAcceptEdits() (tea.Model, tea.Cmd) {
 	session, ok := m.selectedSession()
-	if !ok || session.CurrentHabitat != domain.HabitatClaude || session.BoundaryProfile == boundaries.ProfileFullAccess {
+	if !ok || session.CurrentHabitat != domain.HabitatClaude {
 		return m, nil
 	}
 	state := m.runtimeStates[session.ID]
 	state.AutoAcceptEdits = !state.AutoAcceptEdits
 	m.runtimeStates[session.ID] = state
 	_ = m.store.SaveSessionRuntimeState(m.ctx, session.ID, state)
-
-	resolution := boundaries.Resolve(m.profileForID(session.BoundaryProfile), session.CurrentHabitat)
-	settings := map[string]string{}
-	_ = json.Unmarshal([]byte(resolution.NativeSettings), &settings)
 	if state.AutoAcceptEdits {
-		settings["permission_mode"] = "acceptEdits"
 		m.status = "Auto-accept edits enabled."
 	} else {
 		m.status = "Auto-accept edits disabled."
 	}
-	raw, _ := json.Marshal(settings)
-	session.ResolvedBoundarySettings = string(raw)
-	_ = m.store.UpdateSession(m.ctx, session)
 	_ = m.chat.ReconnectSession(m.ctx, session.ID)
-	m.replaceSession(session)
 	return m, nil
 }
 
@@ -1808,18 +1706,6 @@ func (m Model) performMigration(session domain.Session, model string) tea.Msg {
 	return operationMsg{Session: session, Status: fmt.Sprintf("Migrated to %s.", model)}
 }
 
-func (m Model) performBoundaryChange(session domain.Session, profile domain.BoundaryProfile) tea.Msg {
-	resolution := boundaries.Resolve(profile, session.CurrentHabitat)
-	session.BoundaryProfile = profile.ID
-	session.ResolvedBoundarySettings = resolution.NativeSettings
-	if err := m.store.UpdateSession(m.ctx, session); err != nil {
-		return operationMsg{Err: err, Status: "Boundary update failed"}
-	}
-	_ = m.store.AppendEvent(m.ctx, session.ID, "boundary.changed", map[string]any{"profile": profile.ID, "compatibility": resolution.Compatibility})
-	_, _ = m.store.CreateMessage(m.ctx, session.ID, domain.MessageRoleSystem, fmt.Sprintf("Boundary profile changed to %s (%s).", profile.Name, resolution.Compatibility), "estuary")
-	return operationMsg{Session: session, Status: fmt.Sprintf("Boundary updated to %s.", profile.Name)}
-}
-
 func (m Model) selectedSession() (domain.Session, bool) {
 	if len(m.sessionList) == 0 || m.sessionIx >= len(m.sessionList) {
 		return domain.Session{}, false
@@ -1869,24 +1755,6 @@ func (m Model) indexForModel(model string) int {
 		}
 	}
 	return 0
-}
-
-func (m Model) indexForProfile(id domain.ProfileID) int {
-	for i, profile := range m.profiles {
-		if profile.ID == id {
-			return i
-		}
-	}
-	return 0
-}
-
-func (m Model) profileForID(id domain.ProfileID) domain.BoundaryProfile {
-	for _, profile := range m.profiles {
-		if profile.ID == id {
-			return profile
-		}
-	}
-	return domain.BoundaryProfile{ID: id}
 }
 
 func (m Model) resumeLabel(session domain.Session, state domain.SessionRuntimeState) string {

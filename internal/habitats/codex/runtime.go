@@ -34,13 +34,6 @@ func (r *Runtime) ExecuteTurnStream(ctx context.Context, session domain.Session,
 	if strings.TrimSpace(session.CurrentModel) != "" {
 		args = append(args, "-m", session.CurrentModel)
 	}
-	if sandbox := nativeSetting(session.ResolvedBoundarySettings, "sandbox_mode", "workspace-write"); sandbox != "" {
-		args = append(args, "-s", sandbox)
-	}
-	if approval := nativeSetting(session.ResolvedBoundarySettings, "approval_policy", "on-request"); approval != "" {
-		args = append(args, "-a", approval)
-	}
-
 	cmd := exec.CommandContext(ctx, "codex", args...)
 	cmd.Dir = session.FolderPath
 
@@ -205,16 +198,3 @@ func resumeRejected(message string) bool {
 	return strings.Contains(message, "resume") && (strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "expired"))
 }
 
-func nativeSetting(settingsJSON, key, fallback string) string {
-	if settingsJSON == "" {
-		return fallback
-	}
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
-		return fallback
-	}
-	if value := strings.TrimSpace(settings[key]); value != "" {
-		return value
-	}
-	return fallback
-}

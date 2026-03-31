@@ -13,13 +13,3 @@ func TestExtractAssistantText(t *testing.T) {
 	}
 }
 
-func TestNativeSettingFallback(t *testing.T) {
-	got := NativeSetting(`{"permission_mode":"default"}`, "permission_mode", "acceptEdits")
-	if got != "default" {
-		t.Fatalf("permission mode = %q", got)
-	}
-	got = NativeSetting(`{`, "permission_mode", "acceptEdits")
-	if got != "acceptEdits" {
-		t.Fatalf("fallback = %q", got)
-	}
-}

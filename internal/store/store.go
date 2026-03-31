@@ -13,7 +13,6 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
-	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/domain"
 )
 
@@ -45,10 +44,6 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if err := st.seedBoundaryProfiles(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	if err := st.seedAppSettings(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -77,30 +72,6 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 	}
 	return s.backfillProviderSessions(ctx)
-}
-
-func (s *Store) seedBoundaryProfiles(ctx context.Context) error {
-	for _, profile := range boundaries.DefaultProfiles() {
-		if _, err := s.db.ExecContext(ctx, `
-			INSERT INTO boundary_profiles
-				(id, name, description, policy_level, file_access_policy, command_execution_policy, network_tool_policy, default_approval_behavior, habitat_override_json, compatibility_notes, unsafe)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT(id) DO UPDATE SET
-				name = excluded.name,
-				description = excluded.description,
-				policy_level = excluded.policy_level,
-				file_access_policy = excluded.file_access_policy,
-				command_execution_policy = excluded.command_execution_policy,
-				network_tool_policy = excluded.network_tool_policy,
-				default_approval_behavior = excluded.default_approval_behavior,
-				habitat_override_json = excluded.habitat_override_json,
-				compatibility_notes = excluded.compatibility_notes,
-				unsafe = excluded.unsafe
-		`, string(profile.ID), profile.Name, profile.Description, string(profile.PolicyLevel), string(profile.FileAccessPolicy), string(profile.CommandExecution), string(profile.NetworkToolPolicy), string(profile.DefaultApproval), profile.HabitatOverrideJSON, profile.CompatibilityNotes, profile.Unsafe); err != nil {
-			return fmt.Errorf("seed boundary profile %s: %w", profile.ID, err)
-		}
-	}
-	return nil
 }
 
 func (s *Store) seedAppSettings(ctx context.Context) error {
@@ -139,8 +110,8 @@ type scanner interface {
 
 func scanSession(s scanner) (domain.Session, error) {
 	var session domain.Session
-	var currentHabitat, boundaryProfile, status, runtimeKind, providerStatus string
-	if err := s.Scan(&session.ID, &session.Title, &session.FolderPath, &session.CurrentModel, &currentHabitat, &runtimeKind, &session.ActiveProviderSessionID, &session.NativeSessionID, &boundaryProfile, &session.ResolvedBoundarySettings, &status, &providerStatus, &session.MigrationGeneration, &session.CreatedAt, &session.UpdatedAt, &session.LastOpenedAt); err != nil {
+	var currentHabitat, status, runtimeKind, providerStatus string
+	if err := s.Scan(&session.ID, &session.Title, &session.FolderPath, &session.CurrentModel, &currentHabitat, &runtimeKind, &session.ActiveProviderSessionID, &session.NativeSessionID, &status, &providerStatus, &session.MigrationGeneration, &session.CreatedAt, &session.UpdatedAt, &session.LastOpenedAt); err != nil {
 		return domain.Session{}, err
 	}
 	session.CurrentHabitat = domain.Habitat(currentHabitat)
@@ -150,7 +121,6 @@ func scanSession(s scanner) (domain.Session, error) {
 		Label:   session.CurrentModel,
 		Habitat: session.CurrentHabitat,
 	}
-	session.BoundaryProfile = domain.ProfileID(boundaryProfile)
 	session.Status = domain.SessionStatus(status)
 	session.ProviderStatus = domain.ProviderRuntimeStatus(providerStatus)
 	return session, nil
@@ -158,7 +128,7 @@ func scanSession(s scanner) (domain.Session, error) {
 
 func (s *Store) ListSessions(ctx context.Context) ([]domain.Session, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.boundary_profile_id, s.resolved_boundary_settings, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
+		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
 		FROM sessions s
 		LEFT JOIN provider_sessions ps ON ps.id = s.active_provider_session_id
 		ORDER BY s.last_opened_at DESC, s.updated_at DESC
@@ -183,7 +153,7 @@ func (s *Store) ListSessions(ctx context.Context) ([]domain.Session, error) {
 
 func (s *Store) GetSession(ctx context.Context, sessionID string) (domain.Session, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.boundary_profile_id, s.resolved_boundary_settings, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
+		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
 		FROM sessions s
 		LEFT JOIN provider_sessions ps ON ps.id = s.active_provider_session_id
 		WHERE s.id = ?
@@ -191,40 +161,30 @@ func (s *Store) GetSession(ctx context.Context, sessionID string) (domain.Sessio
 	return scanSession(row)
 }
 
-func (s *Store) CreateSession(ctx context.Context, draft domain.SessionDraft, habitat domain.Habitat, resolution domain.BoundaryResolution) (domain.Session, error) {
+func (s *Store) CreateSession(ctx context.Context, draft domain.SessionDraft, habitat domain.Habitat) (domain.Session, error) {
 	now := time.Now().UTC()
 
 	session := domain.Session{
-		ID:                       uuid.NewString(),
-		Title:                    filepath.Base(draft.FolderPath),
-		FolderPath:               draft.FolderPath,
-		CurrentModel:             draft.Model,
-		ModelDescriptor:          domain.ModelDescriptor{ID: draft.Model, Label: draft.Model, Habitat: habitat},
-		CurrentHabitat:           habitat,
-		RuntimeKind:              domain.SessionRuntimeKindProviderSession,
-		BoundaryProfile:          domain.ProfileID(draft.BoundaryProfile),
-		ResolvedBoundarySettings: resolution.NativeSettings,
-		Status:                   domain.SessionStatusIdle,
-		CreatedAt:                now,
-		UpdatedAt:                now,
-		LastOpenedAt:             now,
+		ID:           uuid.NewString(),
+		Title:        filepath.Base(draft.FolderPath),
+		FolderPath:   draft.FolderPath,
+		CurrentModel: draft.Model,
+		ModelDescriptor: domain.ModelDescriptor{ID: draft.Model, Label: draft.Model, Habitat: habitat},
+		CurrentHabitat: habitat,
+		RuntimeKind:  domain.SessionRuntimeKindProviderSession,
+		Status:       domain.SessionStatusIdle,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		LastOpenedAt: now,
 	}
 	if session.Title == "." || session.Title == string(filepath.Separator) || session.Title == "" {
 		session.Title = draft.FolderPath
 	}
 
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, title, folder_path, current_model, current_habitat, runtime_kind, active_provider_session_id, native_session_id, boundary_profile_id, resolved_boundary_settings, status, migration_generation, created_at, updated_at, last_opened_at)
-		VALUES (?, ?, ?, ?, ?, ?, '', '', ?, ?, ?, 0, ?, ?, ?)
-	`, session.ID, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.CreatedAt, session.UpdatedAt, session.LastOpenedAt)
-	if err != nil {
-		return domain.Session{}, err
-	}
-
-	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO session_boundary_resolutions (session_id, profile_id, habitat, compatibility, summary, native_settings)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, session.ID, string(resolution.ProfileID), string(resolution.Habitat), string(resolution.Compatibility), resolution.Summary, resolution.NativeSettings)
+		INSERT INTO sessions (id, title, folder_path, current_model, current_habitat, runtime_kind, active_provider_session_id, native_session_id, status, migration_generation, created_at, updated_at, last_opened_at)
+		VALUES (?, ?, ?, ?, ?, ?, '', '', ?, 0, ?, ?, ?)
+	`, session.ID, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), string(session.Status), session.CreatedAt, session.UpdatedAt, session.LastOpenedAt)
 	if err != nil {
 		return domain.Session{}, err
 	}
@@ -254,9 +214,9 @@ func (s *Store) UpdateSession(ctx context.Context, session domain.Session) error
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, `
 		UPDATE sessions
-		SET title = ?, folder_path = ?, current_model = ?, current_habitat = ?, runtime_kind = ?, active_provider_session_id = ?, native_session_id = ?, boundary_profile_id = ?, resolved_boundary_settings = ?, status = ?, migration_generation = ?, updated_at = ?, last_opened_at = ?
+		SET title = ?, folder_path = ?, current_model = ?, current_habitat = ?, runtime_kind = ?, active_provider_session_id = ?, native_session_id = ?, status = ?, migration_generation = ?, updated_at = ?, last_opened_at = ?
 		WHERE id = ?
-	`, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), session.ActiveProviderSessionID, session.NativeSessionID, string(session.BoundaryProfile), session.ResolvedBoundarySettings, string(session.Status), session.MigrationGeneration, now, now, session.ID)
+	`, session.Title, session.FolderPath, session.CurrentModel, string(session.CurrentHabitat), string(session.RuntimeKind), session.ActiveProviderSessionID, session.NativeSessionID, string(session.Status), session.MigrationGeneration, now, now, session.ID)
 	return err
 }
 
@@ -585,9 +545,9 @@ func (s *Store) UpsertEcosystemSnapshot(ctx context.Context, health domain.Habit
 	modelsJSON, _ := json.Marshal(health.AvailableModels)
 	warningsJSON, _ := json.Marshal(health.Warnings)
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO ecosystem_snapshots (habitat, installed, authenticated, version, available_models_json, warnings_json, config_path_hint, boundary_behavior, last_probe_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, string(health.Habitat), health.Installed, health.Authenticated, health.Version, string(modelsJSON), string(warningsJSON), health.ConfigPathHint, health.BoundaryBehavior, health.LastProbeAt.UTC())
+		INSERT INTO ecosystem_snapshots (habitat, installed, authenticated, version, available_models_json, warnings_json, config_path_hint, last_probe_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, string(health.Habitat), health.Installed, health.Authenticated, health.Version, string(modelsJSON), string(warningsJSON), health.ConfigPathHint, health.LastProbeAt.UTC())
 	return err
 }
 
@@ -908,4 +868,85 @@ func scanSessionTask(s scanner) (domain.SessionTask, error) {
 		item.ClosedAt = closedAt.Time
 	}
 	return item, nil
+}
+
+// FindRecentSessionForFolder returns the most recently opened session for the
+// given folder path, if one exists.
+func (s *Store) FindRecentSessionForFolder(ctx context.Context, folderPath string) (domain.Session, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT s.id, s.title, s.folder_path, s.current_model, s.current_habitat, s.runtime_kind, s.active_provider_session_id, s.native_session_id, s.status, COALESCE(ps.status, ''), s.migration_generation, s.created_at, s.updated_at, s.last_opened_at
+		FROM sessions s
+		LEFT JOIN provider_sessions ps ON ps.id = s.active_provider_session_id
+		WHERE s.folder_path = ?
+		ORDER BY s.last_opened_at DESC
+		LIMIT 1
+	`, folderPath)
+	session, err := scanSession(row)
+	if err != nil {
+		return domain.Session{}, false, nil // no session for this folder
+	}
+	return session, true, nil
+}
+
+// TouchSession updates last_opened_at and marks the session as active.
+func (s *Store) TouchSession(ctx context.Context, sessionID string) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE sessions SET status = ?, last_opened_at = ?, updated_at = ? WHERE id = ?
+	`, string(domain.SessionStatusActive), now, now, sessionID)
+	return err
+}
+
+// SavePTYSession inserts a new pty_sessions record for a freshly spawned PTY.
+func (s *Store) SavePTYSession(ctx context.Context, ts domain.TerminalSession) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO pty_sessions (id, session_id, provider, pid, attach_strategy, native_session_id, handoff_packet_id, status, exit_code, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, ts.ID, ts.SessionID, string(ts.Provider), ts.PID, ts.AttachStrategy,
+		ts.NativeSessionID, ts.HandoffPacketID, string(ts.Status), ts.ExitCode, ts.StartedAt)
+	return err
+}
+
+// ClosePTYSession marks a pty_session record as exited with an exit code.
+func (s *Store) ClosePTYSession(ctx context.Context, id string, exitCode int) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE pty_sessions SET status = 'exited', exit_code = ?, exited_at = ? WHERE id = ?
+	`, exitCode, now, id)
+	return err
+}
+
+// SaveHandoffPacket persists a HandoffPacket for later retrieval and debugging.
+func (s *Store) SaveHandoffPacket(ctx context.Context, packet domain.HandoffPacket) error {
+	payloadJSON, err := json.Marshal(packet)
+	if err != nil {
+		return fmt.Errorf("marshal handoff packet: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO handoff_packets
+			(id, session_id, source_model, source_provider, target_model, target_provider, switch_type, payload_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, packet.ID, packet.SessionID, packet.SourceModel, string(packet.SourceProvider),
+		packet.TargetModel, string(packet.TargetProvider), string(packet.SwitchType),
+		string(payloadJSON), time.Now().UTC())
+	return err
+}
+
+// LatestHandoffForSession returns the most recent HandoffPacket for a session.
+// The second return value is false if none exists.
+func (s *Store) LatestHandoffForSession(ctx context.Context, sessionID string) (domain.HandoffPacket, bool, error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT payload_json FROM handoff_packets WHERE session_id = ? ORDER BY created_at DESC LIMIT 1
+	`, sessionID)
+	var payloadJSON string
+	if err := row.Scan(&payloadJSON); err == sql.ErrNoRows {
+		return domain.HandoffPacket{}, false, nil
+	} else if err != nil {
+		return domain.HandoffPacket{}, false, err
+	}
+	var packet domain.HandoffPacket
+	if err := json.Unmarshal([]byte(payloadJSON), &packet); err != nil {
+		return domain.HandoffPacket{}, false, fmt.Errorf("unmarshal handoff packet: %w", err)
+	}
+	return packet, true, nil
 }

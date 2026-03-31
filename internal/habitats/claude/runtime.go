@@ -25,7 +25,6 @@ func (r *Runtime) ExecuteTurnStream(ctx context.Context, session domain.Session,
 		"--verbose",
 		"--include-partial-messages",
 		"--output-format", "stream-json",
-		"--permission-mode", NativeSetting(session.ResolvedBoundarySettings, "permission_mode", "default"),
 	}
 	if strings.TrimSpace(session.CurrentModel) != "" {
 		args = append(args, "--model", session.CurrentModel)
@@ -206,16 +205,3 @@ func resumeRejected(message string) bool {
 	return strings.Contains(message, "resume") && (strings.Contains(message, "not found") || strings.Contains(message, "invalid") || strings.Contains(message, "expired"))
 }
 
-func NativeSetting(settingsJSON, key, fallback string) string {
-	if settingsJSON == "" {
-		return fallback
-	}
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
-		return fallback
-	}
-	if value := strings.TrimSpace(settings[key]); value != "" {
-		return value
-	}
-	return fallback
-}

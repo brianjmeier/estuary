@@ -261,11 +261,10 @@ func startClaudeSDKRuntime(ctx context.Context, session domain.Session, resumeCu
 		rt.resumeCursor.Store(resumeCursor)
 	}
 	command := map[string]any{
-		"op":             "start",
-		"sessionId":      session.ID,
-		"cwd":            session.FolderPath,
-		"model":          session.CurrentModel,
-		"permissionMode": claudePermissionMode(session.ResolvedBoundarySettings),
+		"op":        "start",
+		"sessionId": session.ID,
+		"cwd":       session.FolderPath,
+		"model":     session.CurrentModel,
 	}
 	if resumeCursor != nil {
 		if value := firstNonEmpty(
@@ -368,16 +367,6 @@ func (r *claudeSDKRuntime) setSessionID(value string) {
 	}
 }
 
-func claudePermissionMode(settingsJSON string) string {
-	if settingsJSON == "" {
-		return "default"
-	}
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
-		return "default"
-	}
-	return firstNonEmpty(settings["permission_mode"], "default")
-}
 
 func claudeTodoEvents(sessionID, turnID, nativeSessionID string, payload any) []domain.TurnEvent {
 	root, _ := payload.(map[string]any)

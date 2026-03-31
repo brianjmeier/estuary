@@ -1,8 +1,15 @@
 # Estuary
 
-Estuary is a local Go TUI for running Claude Code and Codex sessions behind one current-directory-first chat interface without replacing either habitat's native behavior.
+Estuary is a terminal-first TUI shell that embeds native Claude Code and Codex sessions behind a unified session manager.
 
-The current implemented feature inventory lives in [FEATURES.md](/Users/brianmeier/dev/agenator/FEATURES.md). Treat that file as the authoritative shipped-feature index.
+Instead of a chat layer on top of the providers, Estuary gives you:
+
+- a raw PTY-backed native terminal for Claude Code or Codex with Estuary chrome around it
+- persistent sessions you can switch between without losing context
+- model and provider switching with structured handoff continuity
+- a single shared config and command directory that syncs into both providers
+
+The current implemented feature inventory lives in [FEATURES.md](./FEATURES.md). Treat that file as the authoritative shipped-feature index.
 
 ## Install
 
@@ -12,7 +19,7 @@ If Nix is not already available in your shell, load it first:
 source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 ```
 
-Then you can run Estuary directly from the repo:
+Then run Estuary directly from the repo:
 
 ```bash
 nix run .#estuary
@@ -30,7 +37,27 @@ After that, launch it with:
 estuary
 ```
 
-Estuary also expects the provider CLIs like `claude` and `codex` to be installed separately.
+Estuary requires `claude` and `codex` CLIs to be installed separately. It will probe for them on startup and surface missing or unauthenticated providers in the header.
+
+## How It Works
+
+When you open Estuary:
+
+- the main screen is a full native terminal running Claude Code or Codex
+- Estuary reserves the top two rows for status (session, directory, model, provider, boundary, sync state) and one bottom row for keybind hints
+- `Ctrl+K` opens the command palette for session management, model switching, provider switching, boundary changes, and config sync
+
+When you switch providers (e.g., Claude to Codex):
+
+- Estuary generates a handoff packet from the current session context
+- starts the target provider natively with that context injected
+- persists the runtime metadata so you can reopen it later
+
+When Estuary starts:
+
+- it syncs your `~/.config/estuary/commands/` directory into provider-native command folders
+- it syncs shared config (bash permissions, skills, settings) into each provider's config
+- provider-specific settings stay in a provider-scoped section of `~/.config/estuary/config.yaml`
 
 ## Development
 
@@ -57,12 +84,28 @@ golangci-lint run
 You can also run commands without entering an interactive shell:
 
 ```bash
-source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
 nix develop -c go test ./...
 ```
 
+## Config
+
+Estuary config lives at `~/.config/estuary/config.yaml`. It becomes the source of truth after initial import from existing provider configs.
+
+Shared commands live at `~/.config/estuary/commands/` as individual Markdown files with frontmatter:
+
+```markdown
+---
+name: plan-work
+description: Turn a rough task into an implementation plan
+providers: [claude, codex]
+---
+Analyze the current repository state and produce a concrete implementation plan.
+```
+
+These are synced into provider-native command folders on every Estuary startup.
+
+Runtime data lives at `~/.estuary/data/estuary.db`.
+
 ## Scope
 
-The current shell now opens directly into a fresh session for the current working directory, defaults that session to `claude-sonnet-4-6`, and keeps the main screen focused on transcript plus composer. Sessions, settings, model changes, boundary controls, and traits live behind `Ctrl+K` instead of permanent sidebars.
-
-Check [FEATURES.md](/Users/brianmeier/dev/agenator/FEATURES.md) for the authoritative shipped feature list and current implementation status.
+Check [FEATURES.md](./FEATURES.md) for the authoritative shipped feature list and current implementation status.

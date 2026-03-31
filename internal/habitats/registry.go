@@ -7,31 +7,28 @@ import (
 )
 
 type Descriptor struct {
-	ID               domain.Habitat
-	Label            string
-	Binary           string
-	ConfigHint       string
-	AccentToken      string
-	BoundaryBehavior string
+	ID          domain.Habitat
+	Label       string
+	Binary      string
+	ConfigHint  string
+	AccentToken string
 }
 
 func Registry() []Descriptor {
 	return []Descriptor{
 		{
-			ID:               domain.HabitatClaude,
-			Label:            "Claude",
-			Binary:           "claude",
-			ConfigHint:       "~/.claude",
-			AccentToken:      "habitat.claude",
-			BoundaryBehavior: "Permission mode projection",
+			ID:          domain.HabitatClaude,
+			Label:       "Claude",
+			Binary:      "claude",
+			ConfigHint:  "~/.claude",
+			AccentToken: "habitat.claude",
 		},
 		{
-			ID:               domain.HabitatCodex,
-			Label:            "Codex",
-			Binary:           "codex",
-			ConfigHint:       "~/.codex",
-			AccentToken:      "habitat.codex",
-			BoundaryBehavior: "Approval policy and sandbox projection",
+			ID:          domain.HabitatCodex,
+			Label:       "Codex",
+			Binary:      "codex",
+			ConfigHint:  "~/.codex",
+			AccentToken: "habitat.codex",
 		},
 	}
 }

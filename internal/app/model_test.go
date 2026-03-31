@@ -2,14 +2,12 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"slices"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/chat"
 	"github.com/brianmeier/estuary/internal/domain"
 	"github.com/brianmeier/estuary/internal/habitats"
@@ -183,10 +181,6 @@ func TestShiftTabTogglesClaudeAutoAcceptEdits(t *testing.T) {
 	model, st, session := newTestModel(t, domain.HabitatClaude)
 	defer func() { _ = st.Close() }()
 
-	if got := permissionMode(t, session.ResolvedBoundarySettings); got != "default" {
-		t.Fatalf("initial permission mode = %q, want default", got)
-	}
-
 	next, _ := model.handleMainKey(tea.KeyMsg{Type: tea.KeyShiftTab})
 	model = next.(Model)
 
@@ -196,13 +190,6 @@ func TestShiftTabTogglesClaudeAutoAcceptEdits(t *testing.T) {
 	}
 	if !state.AutoAcceptEdits {
 		t.Fatal("expected auto-accept edits to be enabled")
-	}
-	updated, err := st.GetSession(model.ctx, session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
-	if got := permissionMode(t, updated.ResolvedBoundarySettings); got != "acceptEdits" {
-		t.Fatalf("permission mode after enable = %q, want acceptEdits", got)
 	}
 
 	next, _ = model.handleMainKey(tea.KeyMsg{Type: tea.KeyShiftTab})
@@ -214,13 +201,6 @@ func TestShiftTabTogglesClaudeAutoAcceptEdits(t *testing.T) {
 	}
 	if state.AutoAcceptEdits {
 		t.Fatal("expected auto-accept edits to be disabled")
-	}
-	updated, err = st.GetSession(model.ctx, session.ID)
-	if err != nil {
-		t.Fatalf("get session: %v", err)
-	}
-	if got := permissionMode(t, updated.ResolvedBoundarySettings); got != "default" {
-		t.Fatalf("permission mode after disable = %q, want default", got)
 	}
 }
 
@@ -368,13 +348,10 @@ func newTestModel(t *testing.T, habitat domain.Habitat) (Model, *store.Store, do
 		t.Fatalf("open store: %v", err)
 	}
 
-	profiles := boundaries.DefaultProfiles()
-	profile := profileByID(t, profiles, boundaries.ProfileWorkspaceWrite)
 	session, err := st.CreateSession(ctx, domain.SessionDraft{
-		FolderPath:      t.TempDir(),
-		Model:           "claude-sonnet-4-6",
-		BoundaryProfile: string(profile.ID),
-	}, habitat, boundaries.Resolve(profile, habitat))
+		FolderPath: t.TempDir(),
+		Model:      "claude-sonnet-4-6",
+	}, habitat)
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -390,33 +367,12 @@ func newTestModel(t *testing.T, habitat domain.Habitat) (Model, *store.Store, do
 		migration:     migration.NewService(st),
 		traits:        traits.NewService(st),
 		theme:         DarkTheme(),
-		profiles:      profiles,
 		sessionList:   []domain.Session{session},
 		runtimeStates: map[string]domain.SessionRuntimeState{session.ID: {}},
 		sessionTasks:  map[string][]domain.SessionTask{},
 		compose:       composeState{Mode: domain.ComposeModeChat},
 	}
 	return model, st, session
-}
-
-func profileByID(t *testing.T, profiles []domain.BoundaryProfile, id domain.ProfileID) domain.BoundaryProfile {
-	t.Helper()
-	for _, profile := range profiles {
-		if profile.ID == id {
-			return profile
-		}
-	}
-	t.Fatalf("profile %q not found", id)
-	return domain.BoundaryProfile{}
-}
-
-func permissionMode(t *testing.T, raw string) string {
-	t.Helper()
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(raw), &settings); err != nil {
-		t.Fatalf("unmarshal permission settings: %v", err)
-	}
-	return settings["permission_mode"]
 }
 
 func hasShortcut(rows [][2]string, key, label string) bool {

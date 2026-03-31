@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/domain"
 	"github.com/brianmeier/estuary/internal/habitats"
 	"github.com/brianmeier/estuary/internal/store"
@@ -28,67 +27,56 @@ func (s *Service) List(ctx context.Context) ([]domain.Session, error) {
 	return s.store.ListSessions(ctx)
 }
 
-func (s *Service) CreateCurrent(ctx context.Context, folderPath string, profiles []domain.BoundaryProfile) (domain.Session, domain.BoundaryResolution, int, error) {
-	return s.Create(ctx, domain.SessionDraft{
-		FolderPath:      folderPath,
-		Model:           "claude-sonnet-4-6",
-		BoundaryProfile: string(boundaries.ProfileWorkspaceWrite),
-	}, profiles)
+// FindForFolder returns the most recently opened session for folderPath.
+// The second return value is false if no session exists for that folder.
+func (s *Service) FindForFolder(ctx context.Context, folderPath string) (domain.Session, bool, error) {
+	return s.store.FindRecentSessionForFolder(ctx, filepath.Clean(folderPath))
 }
 
-func (s *Service) Create(ctx context.Context, draft domain.SessionDraft, profiles []domain.BoundaryProfile) (domain.Session, domain.BoundaryResolution, int, error) {
+func (s *Service) CreateCurrent(ctx context.Context, folderPath string) (domain.Session, int, error) {
+	return s.Create(ctx, domain.SessionDraft{
+		FolderPath: folderPath,
+		Model:      "claude-sonnet-4-6",
+	})
+}
+
+func (s *Service) Create(ctx context.Context, draft domain.SessionDraft) (domain.Session, int, error) {
 	folderPath := filepath.Clean(strings.TrimSpace(draft.FolderPath))
 	model := strings.TrimSpace(draft.Model)
-	profileID := strings.TrimSpace(draft.BoundaryProfile)
 
 	if folderPath == "" {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("folder path is required")
+		return domain.Session{}, 0, fmt.Errorf("folder path is required")
 	}
 	info, err := os.Stat(folderPath)
 	if err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("folder path is not accessible: %w", err)
+		return domain.Session{}, 0, fmt.Errorf("folder path is not accessible: %w", err)
 	}
 	if !info.IsDir() {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("folder path must be a directory")
+		return domain.Session{}, 0, fmt.Errorf("folder path must be a directory")
 	}
 	if model == "" {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("model is required")
+		return domain.Session{}, 0, fmt.Errorf("model is required")
 	}
 
 	habitat, ok := habitats.HabitatForModel(model)
 	if !ok {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("could not map model %q to a habitat", model)
+		return domain.Session{}, 0, fmt.Errorf("could not map model %q to a habitat", model)
 	}
 
-	var profile domain.BoundaryProfile
-	found := false
-	for _, candidate := range profiles {
-		if candidate.ID == domain.ProfileID(profileID) {
-			profile = candidate
-			found = true
-			break
-		}
-	}
-	if !found {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, fmt.Errorf("unknown boundary profile %q", profileID)
-	}
-
-	resolution := boundaries.Resolve(profile, habitat)
 	existingCount, err := s.store.CountActiveSessionsByFolder(ctx, folderPath)
 	if err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, 0, err
+		return domain.Session{}, 0, err
 	}
 
 	session, err := s.store.CreateSession(ctx, domain.SessionDraft{
-		FolderPath:      folderPath,
-		Model:           model,
-		BoundaryProfile: profileID,
-	}, habitat, resolution)
+		FolderPath: folderPath,
+		Model:      model,
+	}, habitat)
 	if err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+		return domain.Session{}, existingCount, err
 	}
 	if err := s.store.SaveSessionRuntimeState(ctx, session.ID, domain.SessionRuntimeState{Active: true, FirstRunCompleted: true}); err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+		return domain.Session{}, existingCount, err
 	}
 	providerRef := domain.ProviderSessionRef{
 		ID:          uuid.NewString(),
@@ -100,13 +88,13 @@ func (s *Service) Create(ctx context.Context, draft domain.SessionDraft, profile
 		UpdatedAt:   time.Now().UTC(),
 	}
 	if err := s.store.UpsertProviderSession(ctx, providerRef); err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+		return domain.Session{}, existingCount, err
 	}
 	if err := s.store.SetActiveProviderSession(ctx, session.ID, providerRef.ID, ""); err != nil {
-		return domain.Session{}, domain.BoundaryResolution{}, existingCount, err
+		return domain.Session{}, existingCount, err
 	}
 	session.ActiveProviderSessionID = providerRef.ID
 	session.ProviderStatus = providerRef.Status
 
-	return session, resolution, existingCount, nil
+	return session, existingCount, nil
 }

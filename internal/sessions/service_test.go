@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/brianmeier/estuary/internal/boundaries"
 	"github.com/brianmeier/estuary/internal/domain"
 	"github.com/brianmeier/estuary/internal/store"
 )
@@ -30,13 +29,11 @@ func TestCreateSessionPersistsAndWarnsOnDuplicateFolder(t *testing.T) {
 	}()
 
 	svc := NewService(st)
-	profiles := boundaries.DefaultProfiles()
 
-	first, resolution, duplicates, err := svc.Create(ctx, domain.SessionDraft{
-		FolderPath:      projectDir,
-		Model:           "gpt-5",
-		BoundaryProfile: string(boundaries.ProfileWorkspaceWrite),
-	}, profiles)
+	first, duplicates, err := svc.Create(ctx, domain.SessionDraft{
+		FolderPath: projectDir,
+		Model:      "gpt-5",
+	})
 	if err != nil {
 		t.Fatalf("first create: %v", err)
 	}
@@ -45,9 +42,6 @@ func TestCreateSessionPersistsAndWarnsOnDuplicateFolder(t *testing.T) {
 	}
 	if first.CurrentHabitat != domain.HabitatCodex {
 		t.Fatalf("expected codex habitat, got %s", first.CurrentHabitat)
-	}
-	if resolution.Compatibility != domain.BoundaryCompatibilityExact {
-		t.Fatalf("expected exact codex mapping, got %s", resolution.Compatibility)
 	}
 	ref, err := st.GetProviderSessionBySession(ctx, first.ID, domain.SessionRuntimeKindProviderSession)
 	if err != nil {
@@ -60,11 +54,10 @@ func TestCreateSessionPersistsAndWarnsOnDuplicateFolder(t *testing.T) {
 		t.Fatalf("expected connecting provider status, got %s", ref.Status)
 	}
 
-	_, _, duplicates, err = svc.Create(ctx, domain.SessionDraft{
-		FolderPath:      projectDir,
-		Model:           "claude-sonnet-4",
-		BoundaryProfile: string(boundaries.ProfileWorkspaceWrite),
-	}, profiles)
+	_, duplicates, err = svc.Create(ctx, domain.SessionDraft{
+		FolderPath: projectDir,
+		Model:      "claude-sonnet-4",
+	})
 	if err != nil {
 		t.Fatalf("second create: %v", err)
 	}
@@ -93,11 +86,10 @@ func TestCreateSessionRejectsUnknownModel(t *testing.T) {
 
 	svc := NewService(st)
 
-	_, _, _, err = svc.Create(ctx, domain.SessionDraft{
-		FolderPath:      projectDir,
-		Model:           "mystery-model",
-		BoundaryProfile: string(boundaries.ProfileWorkspaceWrite),
-	}, boundaries.DefaultProfiles())
+	_, _, err = svc.Create(ctx, domain.SessionDraft{
+		FolderPath: projectDir,
+		Model:      "mystery-model",
+	})
 	if err == nil {
 		t.Fatal("expected unknown model error")
 	}

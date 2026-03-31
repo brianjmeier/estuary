@@ -1,60 +1,48 @@
-PLEASE IMPLEMENT THIS PLAN:
-# Estuary vNext: Go TUI for Unified Claude Code and Codex Sessions
+# Estuary: Native Claude Code and Codex Terminal Orchestrator
 
 ## Summary
 
-Build `Estuary` as a local Go TUI that centralizes Claude Code and Codex usage behind one multi-session chat interface.
+Estuary is a terminal-first TUI shell that embeds native Claude Code and Codex sessions.
 
-The app is intentionally narrow:
+The product is:
 
-- no git clone management
-- no repo registry
-- no branch workflow
-- no app-managed workspaces
-- no ticket or PR workflow
-- no app-owned system prompt layer
+- a native session host for Claude Code and Codex
+- a model and provider switcher
+- a continuity manager for switching across models and providers
+- a config authority that imports, unifies, and syncs Claude/Codex setup
+- a shared command sync tool that writes command files into provider-native command folders
 
-Estuary’s job is to coordinate, persist, and bridge native provider sessions without redefining them.
+The primary value proposition:
 
-Core responsibilities:
-
-- multi-session tabs
-- common chat UI
-- user-picked local folders as session roots
-- model-first provider routing
-- persisted and resumable sessions
-- app-managed continuity for model/provider switching via `Migration`
-- shared commands, skills, and tools managed once in `Traits`
-- provider-specific health and key config managed through `Habitat Settings`
-- app-owned permission profiles translated into provider-native settings via `Boundaries`
+- open the right native tool from one place
+- switch cleanly without losing working context
+- manage shared setup once
+- keep provider-native command systems aligned from one Estuary-owned source of truth
 
 ## Product Decisions Locked
 
 - App name: `Estuary`
 - Language/runtime: Go
-- Shell: TUI
-- Session model: multi-session tabs
-- Session root: user-picked local folder
-- Multiple live sessions per folder: allowed, with warning
-- User chooses model, app maps to habitat
-- Model catalog: detected from installed habitats
-- UI contract: common chat only
-- Persistence: local transcript + metadata persistence, resume when possible
-- Habitat switching: allowed inside one Estuary session via app-managed `Migration`
-- Shared commands/skills/tools: core v1 feature under `Traits`
-- Shared capability source of truth: Estuary-owned registry
-- Provider-specific setup: health + key settings only under `Habitat Settings`
-- Backend integration mode: mixed by habitat, using the cleanest implementation per backend
-- No app-owned system prompt
-- No hidden app persona or cross-provider harness override prompt
-- `Boundaries` are app-owned and explicitly configured by the user
-- Estuary translates `Boundaries` into habitat-native settings
-- Use `Species` as supporting product language for models, but keep `Model` as the primary technical label in detailed UI
+- Shell: TUI (Bubble Tea)
+- Main screen: single embedded native terminal via raw PTY passthrough
+- Estuary reserves terminal rows for always-visible chrome (header + footer)
+- Session model: multiple persisted sessions
+- Session continuity: restart + handoff injection (no PTY reattachment)
+- Session restore: relaunch native tool with resume flag; fall back to handoff if unavailable
+- Model catalog: Estuary-owned registry with probe validation
+- Shared config: Estuary imports provider configs, resolves conflicts once, becomes source of truth, syncs on startup
+- Config scope: unify commands, bash permissions, and skills; provider-specific knobs live in a provider-scoped section of the Estuary config file
+- Shared commands: stored as individual files under one `~/.config/estuary/commands/` directory; provider routing via per-file metadata; synced into provider-native command folders on startup
+- Command invocation happens inside Claude Code or Codex native UX only; Estuary does not expose a command invocation UI
+- Command bodies are raw pass-through text; Estuary does not implement templating or argument preprocessing
+- Provider-scoped commands are allowed in the shared command directory
+- Drift detection is per command file and per provider config source
+- Traits (SQLite) are replaced by filesystem command files; no retrocompatibility required
+- HandoffPacket extends MigrationCheckpoint (same type, extended fields)
+- `model.go` rewrite is additive: new PTY-first model written alongside old code, old code removed after new works
+- Development environment: Nix flakes
 - Every implemented feature must update `FEATURES.md`
-- `README.md` must reference `FEATURES.md` as the up-to-date implemented feature index
-- Development environment must be provisioned with Nix flakes
-- Project setup must make `go` and required tooling available through Nix, not ad hoc local installation
-- Any implementation instructions that rely on Nix must assume `source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh` before using Nix commands
+- `README.md` must reference `FEATURES.md` as the authoritative feature index
 
 ## Naming System
 
@@ -62,1017 +50,514 @@ Core responsibilities:
 
 - App: `Estuary`
 - Sessions: `Sessions`
-- Providers/backends: `Habitats`
+- Providers/backends: `Providers` (replacing `Habitats` in new code)
 - Models: `Models`
-- Shared setup: `Traits`
-- Provider-specific setup: `Habitat Settings`
-- Continuity switch: `Migration`
+- Shared setup: `Commands` (filesystem-first, replacing `Traits`)
+- Continuity switch: `Handoff`
 - Health: `Ecosystem`
 - Permissions: `Boundaries`
 
-### Supporting Language
+### Legacy Names (kept in old code, not used in new code)
 
-Use `Species` as framing copy, not as the only primary UI label.
-
-Examples:
-
-- “Choose a model and Estuary will route it to the right habitat.”
-- “This species is native to the Claude habitat.”
-- “Migration continues this session in a new habitat.”
-- “Traits are shared across habitats when compatible.”
-
-### UI Labeling Rule
-
-Use standard labels where precision matters:
-
-- `Model`
-- `Session`
-- `Provider` only in technical/debug surfaces if needed
-
-Use metaphorical labels in navigation and product framing:
-
-- `Habitats`
-- `Traits`
-- `Migration`
-- `Ecosystem`
-- `Boundaries`
-
-## Documentation Rule
-
-### Feature Inventory
-
-`FEATURES.md` is the canonical inventory of implemented product behavior.
-
-Rules:
-
-- every time a feature is implemented, expanded, materially changed, or removed, update `FEATURES.md` in the same change
-- `FEATURES.md` should describe shipped behavior, not aspirational roadmap items
-- `FEATURES.md` should be organized by user-visible capability areas
-- each feature entry should indicate current status plainly:
-  - implemented
-  - partial
-  - experimental
-- implementation work is not complete unless `FEATURES.md` is updated accordingly
-
-### README Linkage
-
-`README.md` must reference `FEATURES.md` prominently as the current feature index.
-
-Rules:
-
-- `README.md` should contain a clear link to `FEATURES.md`
-- `README.md` should not become the full feature matrix
-- if `README.md` summarizes features, it must point readers to `FEATURES.md` for the authoritative current list
-
-### Delivery Requirement
-
-For every future implementation plan or feature task, include:
-
-- code change
-- verification
-- `FEATURES.md` update
-- `README.md` update if the reference is missing or stale
-
-## Development Environment
-
-### Tooling Strategy
-
-Use Nix flakes for project-local development tooling.
-
-Goals:
-
-- reproducible Go toolchain
-- reproducible formatter/linter/test tooling
-- no dependence on whatever Go version happens to be installed globally
-- easier onboarding for future contributors and future sessions
-
-### Required Setup Artifacts
-
-Repository should include:
-
-- `flake.nix`
-- `flake.lock`
-- optionally `.envrc` if later paired with `direnv`, but not required for v1
-- updated `README.md` setup instructions describing how to enter the dev environment
-
-### Nix Shell Requirements
-
-The flake dev shell should provide at minimum:
-
-- `go`
-- `gofmt`
-- `gcc` or required C toolchain if needed by Go dependencies
-- `git`
-- `sqlite`
-- any additional CLI tooling required for development, such as:
-  - `golangci-lint` if adopted
-  - `just` if adopted
-  - `delve` if adopted
-
-Provider CLIs like `claude` and `codex` are not required to be installed through Nix for v1.
-They remain external runtime dependencies detected by the app.
-
-### Nix Usage Rule
-
-All implementation/setup documentation must assume:
-
-```bash
-source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
-```
-
-before running Nix commands if Nix is not already in the shell environment.
-
-### Dev Workflow Rule
-
-Preferred project entry commands should become:
-
-- `nix develop`
-- then Go project commands inside that shell
-
-or, if using `nix develop -c` style, document that explicitly.
+- `Habitats` → replaced by `Providers`
+- `Traits` → replaced by `Commands`
+- `Migration` → replaced by `Handoff`
 
 ## Design Language
 
 ### Theme Statement
 
-Estuary should feel like a coastal control room for intelligent systems:
-calm, literate, habitat-aware, and operationally trustworthy.
+Estuary should feel like a coastal control room for intelligent systems: calm, literate, habitat-aware, and operationally trustworthy.
 
 ### Visual Principles
 
-- Different habitats, one shoreline
+- Different providers, one shoreline
 - Technical clarity first, metaphor second
 - Strong hierarchy with generous breathing room
-- Calm operational feel, not flashy “AI tool” theatrics
-- Shared product identity across all habitats
+- Calm operational feel, not flashy AI tool theatrics
+- Shared product identity across all providers
 - Restraint in color, motion, and ornament
 
-### Light and Dark Theme Strategy
+### Chrome Layout
 
-Estuary must support first-class light and dark themes.
+Estuary reserves terminal rows around the native PTY session:
 
-Rules:
+- Header (2 rows): session name, current directory, active model, active provider, boundary profile, native runtime state, config sync state
+- Footer (1 row): minimal keybind hints
 
-- Light and dark are two expressions of the same estuarial design system
-- Same hierarchy, spacing, labeling, and habitat semantics in both themes
-- Dark mode must not collapse into generic neon hacker-terminal aesthetics
-- Light mode must not collapse into flat white enterprise blankness
-- All components use semantic tokens, not hardcoded colors
-
-### Light Theme Direction
-
-Light theme should evoke:
-
-- fog
-- sand
-- silt
-- reeds
-- tidepool water
-
-Characteristics:
-
-- warm neutral surfaces
-- restrained cool-water accents
-- readable contrast without sterile white
-- habitat colors as subtle annotations
-
-### Dark Theme Direction
-
-Dark theme should evoke:
-
-- deep inlet water
-- wet stone
-- marsh at dusk
-- peat and shoreline shadows
-
-Characteristics:
-
-- layered dark surfaces, not pure black
-- muted blue-green depth tones
-- warm mineral accents for balance
-- calm operational feel, not sci-fi neon
-
-### Dark Mode Rules
-
-- backgrounds use softened charcoal-blue / peat / deep-water tones, not flat black
-- borders are low-contrast and sparse
-- active states use water-blue or reed-green, not electric cyan
-- warnings use muted amber
-- danger uses oxidized rust/red, not bright alarm red
-- habitat accents remain localized and subtle
-- readability in chat and status surfaces takes priority over visual mood
+The PTY fills all remaining rows.
 
 ### Color Semantics
 
-Core semantic accents:
-
-- water: focus, active selection, migration flow
+- water: focus, active selection, handoff flow
 - reed: safe progress, confirmation, ready states
 - clay: warmth, provider annotation, grounded emphasis
 - amber: warning, approximation, caution
 - rust: danger, destructive actions, unsafe full access
 
-Habitat tint guidance:
-
-- Claude habitat: warm mineral / clay / amber tint
-- Codex habitat: cool water / steel-blue tint
-
-Habitat colors must not dominate the whole UI.
-
-### Typography
-
-- one serious monospace for chat, logs, code-like detail
-- one readable UI face for labels, tabs, panels
-- stable vertical rhythm across panes
-- prioritize legibility over novelty
-- avoid default “developer app” sameness when the environment allows stronger choices
-
-### Layout Rules
-
-- Left: Sessions
-- Center: Chat
-- Right: Context panel
-  - Model
-  - Habitat
-  - Boundaries
-  - Traits in effect
-  - Ecosystem warnings
-- Modals for:
-  - Migration
-  - Habitat Settings
-  - Traits
-  - Boundaries
-- Setup/configuration should not overload the main chat pane
-
-### Motion and Interaction
-
-- session switching: quick and quiet
-- streaming output: steady incremental reveal
-- migration: one clear transition state with explicit checkpointing
-- warnings and errors: precise, noticeable, never theatrical
-
-### Anti-Patterns To Ban
-
-- generic hacker-terminal aesthetic
-- random purple gradients
-- excessive box nesting
-- too many borders
-- metaphor overload in primary labels
-- provider colors taking over the full interface
-- hidden unsafe states
-- cute wildlife branding that makes the app unserious
-- dark mode as pure black + neon accents
-- light mode as blank white with no atmosphere
-
-### Terminology Usage Rules
-
-- Use `Model` in controls and technical detail
-- Use `species` in helper copy and onboarding language
-- Use `Habitats` in navigation and setup
-- Use `Traits` for shared commands/skills/tools
-- Use `Migration` only for cross-model/provider continuity
-- Use `Boundaries` consistently for permission profiles
-- Use `Ecosystem` for health/readiness only
+Provider tint:
+- Claude: warm mineral / clay / amber
+- Codex: cool water / steel-blue
 
 ### Theme Token Requirements
 
-Define semantic theme tokens at minimum for:
-
-- `bg.canvas`
-- `bg.surface`
-- `bg.panel`
-- `fg.primary`
-- `fg.muted`
+Semantic tokens (same as before, unchanged):
+- `bg.canvas`, `bg.surface`, `bg.panel`
+- `fg.primary`, `fg.muted`
 - `border.soft`
-- `accent.water`
-- `accent.reed`
-- `accent.clay`
-- `status.warning`
-- `status.danger`
-- `status.success`
-- `habitat.claude`
-- `habitat.codex`
+- `accent.water`, `accent.reed`, `accent.clay`
+- `status.warning`, `status.danger`, `status.success`
+- `habitat.claude`, `habitat.codex`
 
-Both light and dark themes must derive from these same semantic tokens.
+Both light and dark themes derive from these tokens.
 
 ## Architecture
 
 ### Top-Level Components
 
-1. `cmd/estuary`
-   - app entrypoint
-   - bootstraps config, DB, and TUI runtime
+1. `cmd/estuary` — app entrypoint
+2. `internal/app` — root Bubble Tea model (PTY-first rewrite)
+3. `internal/pty` — PTY manager, terminal embedding, resize, process lifecycle
+4. `internal/providers` — provider terminal adapters (Claude, Codex)
+5. `internal/sessions` — session lifecycle, persistence, restore orchestration
+6. `internal/handoff` — handoff packet generation, storage, injection
+7. `internal/configsync` — provider config detection, import, conflict resolution, startup sync, drift detection
+8. `internal/commands` — command file parser/validator, provider sync writers, import from provider-native folders
+9. `internal/boundaries` — boundary profile model, provider-native translation
+10. `internal/store` — SQLite persistence
+11. `internal/prereq` — provider probing, install/auth/model detection
 
-2. `internal/app`
-   - root Bubble Tea model
-   - routing, hotkeys, modal state, focus management
+### Legacy Components (kept during transition, removed in Phase 8)
 
-3. `internal/sessions`
-   - create/open/close sessions
-   - session switching
-   - persistence and resume orchestration
-   - folder conflict warnings
-
-4. `internal/habitats`
-   - habitat registry
-   - model discovery
-   - per-habitat session runtimes
-   - habitat capability metadata
-   - habitat-native boundary translation
-
-5. `internal/habitats/claude`
-   - Claude Code integration
-   - structured session/turn handling where available
-   - Claude-specific migration/bootstrap logic
-   - Claude boundary/config projection
-
-6. `internal/habitats/codex`
-   - Codex integration
-   - structured or app-server-driven session/turn handling where practical
-   - Codex-specific migration/bootstrap logic
-   - Codex boundary/config projection
-
-7. `internal/chat`
-   - app-owned normalized chat timeline
-   - assistant/user/system/tool message model
-   - streaming aggregation
-
-8. `internal/migration`
-   - habitat switching handoff
-   - session compaction checkpoints
-   - continuation prompt generation
-
-9. `internal/traits`
-   - Estuary-owned registry for shared commands, skills, and tools
-   - habitat compatibility metadata
-   - habitat projection/sync helpers
-
-10. `internal/habitatconfig`
-   - habitat health checks
-   - key settings read/write
-   - habitat setup summaries
-
-11. `internal/boundaries`
-   - app-owned boundary profile model
-   - translation into habitat-native settings
-   - compatibility and mismatch reporting
-
-12. `internal/store`
-   - SQLite migrations
-   - persistence layer for sessions, messages, checkpoints, traits, settings
-
-13. `internal/prereq`
-   - verifies `claude` and `codex`
-   - checks auth/readiness
-   - probes model lists
+- `internal/chat` — unified chat runtime (legacy)
+- `internal/habitats` — habitat turn streaming (legacy)
+- `internal/traits` — SQLite trait registry (legacy, replaced by `internal/commands`)
+- `internal/migration` — migration checkpoint service (extended into `internal/handoff`)
 
 ## Core Runtime Model
 
 ### Session
 
-Stores:
+A session binds:
+- one folder path
+- one active model and provider selection
+- one boundary profile
+- one native terminal runtime record
+- one latest handoff packet reference
+- one config sync status snapshot
+- native session identifiers if resumable
 
-- session id
-- title
-- current folder path
-- current model
-- current habitat
-- provider-native session id if available
-- selected boundary profile
-- resolved habitat-native boundary settings
-- status
-- created_at / updated_at / last_opened_at
-- migration generation number
+### Native Terminal Runtime
 
-### Message
+A runtime record tracks:
+- provider (claude | codex)
+- process PID
+- PTY state
+- startup args and env
+- attach strategy (resume | handoff | fresh)
+- last exit info
 
-Stores:
+### HandoffPacket (extends MigrationCheckpoint)
 
-- message id
-- session id
-- turn id
-- role: user | assistant | system | tool | summary
-- content blocks
-- source: user | provider | migration
-- timestamps
-
-### Runtime Event
-
-Stores events such as:
-
-- session.created
-- session.resumed
-- session.folder-bound
-- model.changed
-- habitat.changed
-- boundaries.changed
-- turn.started
-- assistant.delta
-- tool.started
-- tool.output
-- tool.finished
-- migration.checkpoint.created
-- habitat.error
-- session.closed
-
-### Trait
-
-Stores:
-
-- trait id
-- type: command | skill | tool
-- name
-- description
-- scope: global | folder | session
-- canonical definition
-- supports_claude
-- supports_codex
-- sync_mode: native | bootstrap-only | unsupported
-- dispatch_mode: provider-native | injected-context | unsupported
-- timestamps
-
-### Boundary Profile
-
-Stores:
-
-- profile id
-- name
-- description
-- policy level
-- file access policy
-- command execution policy
-- network/tool policy if configurable
-- default approval behavior
-- per-habitat override mappings if needed
-- compatibility notes
-
-## User Experience
-
-### Main Layout
-
-- left pane: session tabs/list
-- center pane: active chat timeline
-- bottom pane: composer / action hints
-- right pane or modal: session context, model, habitat, folder, status, boundaries, trait shortcuts
-
-### Core Flows
-
-#### New Session
-
-1. User starts new session.
-2. User picks a local folder.
-3. App warns if another live session already targets that folder.
-4. App probes available models from installed habitats.
-5. User picks model.
-6. App maps model to habitat.
-7. User selects a boundary profile or accepts the default.
-8. App translates that profile into habitat-native settings.
-9. App starts habitat session.
-10. Estuary opens a common chat timeline for that session.
-
-#### Send Message
-
-1. User submits message in common chat UI.
-2. App persists user message immediately.
-3. App forwards the turn to the current habitat runtime.
-4. Habitat output is normalized into streaming timeline items.
-5. Final assistant/tool output is persisted.
-
-#### Migration
-
-1. User changes model in the session.
-2. App determines whether the habitat changes too.
-3. App creates a migration checkpoint from Estuary-owned session state.
-4. App starts or resumes a habitat session for the new model/habitat.
-5. App injects minimal continuation context.
-6. Chat continues in the same Estuary session timeline, with a migration event recorded.
-
-## Common Chat Contract
-
-The visible UI is habitat-neutral.
-
-The common chat must support:
-
-- streaming assistant output
-- tool activity rows
-- system notices
-- session status indicators
-- migration notices
-- user-authored messages
-- app-authored summaries/checkpoints
-- approval-needed prompts when the active boundary profile requires them
-
-The UI does not expose raw terminals in v1.
-
-If a habitat has behavior that does not map cleanly, represent it as:
-
-- a system event
-- a habitat-specific detail row
-- or a structured fallback block in the timeline
-
-## Harness Rule: No Estuary System Prompt
-
-This is a hard rule.
-
-Estuary must not introduce:
-
-- a canonical system prompt
-- a hidden app persona
-- a cross-habitat “meta harness” prompt that overrides native behavior
-
-The app should preserve each model inside its native habitat.
-
-Allowed text injection is limited to:
-
-- user-authored messages
-- explicit trait payloads the user enabled
-- minimal migration summaries when switching habitats
-- operational context strictly required to continue a session
-
-Estuary coordinates the habitats. It does not replace them.
-
-## Backend Integration Strategy
-
-### Principle
-
-Use the best implementation mode per habitat, but preserve one Estuary-owned session model.
-
-That means:
-
-- Claude and Codex do not need identical internal adapters.
-- Estuary owns the user-facing session/timeline contract.
-- Habitat-specific details stay behind habitat runtime interfaces.
-
-### Claude Habitat
-
-Use Claude Code’s cleaner structured interfaces where available for:
-
-- streaming output
-- session continuation
-- model selection
-- boundary projection
-- trait integration where safe
-
-### Codex Habitat
-
-Use the cleanest stable path available, such as:
-
-- structured execution mode
-- app-server-like integration if it materially improves session handling
-- session continuation through Estuary’s migration layer
-- native approval/sandbox setting projection
-
-### Why Mixed-By-Habitat
-
-This matches the `t3code` lesson you liked:
-
-- common UX
-- habitat-specific internals
-- avoid forcing a lowest-common-denominator backend layer
-
-## Migration and Continuity
-
-### Ownership
-
-Migration is app-owned.
-
-Habitats may have native resume/continue features, but Estuary always writes its own canonical checkpoint.
-
-### Trigger Rules
-
-Create migration checkpoints:
-
-- before habitat/model switch
-- before risky resume paths
-- when session history grows beyond heuristic thresholds
-- on manual user action
-
-### Checkpoint Contents
-
+Contains:
 - active objective
-- important prior decisions
-- current folder path
-- current model/habitat
-- rolling conversation summary
-- open tasks/questions
-- active traits in effect
-- recent notable tool outputs
-- habitat-specific notes worth preserving
+- concise recent work summary
+- open tasks
+- important decisions
+- relevant file and directory references
+- source model and provider
+- target model and provider (when switching)
+- boundary profile
+- timestamp
+- optional user note
 
-### Continuation Model
+Used for:
+- cross-provider switching
+- same-provider restart fallback
+- failed native resume
+- reopening sessions without viable native attachment
+- migrating old unified-chat sessions into native sessions
 
-Estuary does not attempt to share opaque hidden habitat state.
-It preserves app-owned working context and rehydrates the next habitat session from that.
+## PTY Runtime Architecture
 
-## Traits
+### Raw Terminal Passthrough
 
-### Scope
+Estuary uses raw PTY passthrough: the native tool process gets a real PTY and its input/output flows directly through the system terminal. Estuary does not re-render the terminal content.
 
-This is in v1, not deferred.
+Estuary claims:
+- top 2 rows: header chrome
+- bottom 1 row: footer chrome
 
-### Canonical Model
+The native tool occupies all remaining rows. Resize events are forwarded to the PTY process.
 
-Estuary owns the canonical `Traits` registry.
+### Provider Terminal Adapters
 
-Habitats receive projections of these traits when possible, but habitat-native storage is not the source of truth.
+Each provider adapter defines:
+- startup command and args
+- env vars
+- cwd behavior
+- boundary projection to CLI flags
+- config sync target paths
+- native session ID extraction (if available)
+- same-provider switch strategy
+- handoff injection method
+- resume capability rules
 
-### Categories
+Files:
+- `internal/providers/claude_terminal.go`
+- `internal/providers/codex_terminal.go`
 
-#### Commands
-Reusable executable or provider-routed actions the user can invoke from Estuary.
+## Continuity and Switching
 
-#### Skills
-Reusable instruction bundles / role overlays / workflow prompts.
+### Session Restore
 
-#### Tools
-Named capability definitions that may map to habitat-native tool config, injected instructions, or unsupported states.
+When a session is reopened:
+1. Estuary tries native resume (Claude `--resume <id>`, Codex thread resume)
+2. If native resume is unavailable or fails, inject latest handoff packet as startup context
+3. Persist new runtime metadata
 
-### Trait Behavior
+No PTY reattachment. The user manages their own shell persistence if they want it.
 
-Each trait must define:
+### Same-Provider Switch
 
-- name
-- type
-- description
-- scope
-- canonical payload
-- compatibility metadata
-- how it gets projected per habitat
-- whether it is invokable from the active session
+Use the provider's best native strategy:
+- if in-place switching exists (e.g., Claude model flag), use it
+- otherwise restart the same provider and inject handoff
 
-### UX Requirements
+Do not ask the user to choose the switch mechanism.
 
-- `Traits` setup screen for commands, skills, tools
-- Explicit compatibility labels:
-  - Shared
-  - Claude-only
-  - Codex-only
-  - Partial
-- Clear failure states when a trait cannot be projected into the current habitat
+### Cross-Provider Switch
 
-## Boundaries
+Always:
+1. Generate handoff packet
+2. Stop or detach old native session
+3. Start target provider natively with selected model and boundaries
+4. Inject handoff into target session startup
+5. Persist new runtime metadata
+6. Record switch event
 
-### Principle
+## Config and Sync
 
-`Boundaries` are configured by the user in Estuary, then translated into each habitat’s native settings.
+### Estuary Canonical Config
 
-Estuary does not inherit `t3code`’s binary naming or defaults.
+Location: `~/.config/estuary/config.yaml`
 
-### Boundary Profiles
+Contains:
+- theme and app settings
+- model registry settings
+- provider paths and detection overrides
+- sync state metadata
+- boundary defaults
+- provider-specific override sections (e.g., `claude:`, `codex:`)
+- onboarding and import metadata
 
-V1 should support these canonical profiles:
+Shared across providers (unified):
+- commands (managed via `~/.config/estuary/commands/`)
+- bash permissions
+- skills
 
-- `Ask Always`
-  - every risky action requires approval
-- `Workspace Write`
-  - allow normal work in the selected folder, escalate for broader access
-- `Read Only`
-  - inspect and chat only, no writes
-- `Full Access`
-  - no approvals, clearly marked unsafe
+Provider-specific (in provider section):
+- any setting that only makes sense for one provider
 
-### Translation Layer
+### Config Import / Conflict Resolution / Sync
 
-Estuary maps these profiles to habitat-native settings such as:
+`internal/configsync` responsibilities:
+- detect Claude and Codex config sources
+- import existing provider config
+- map overlaps into Estuary canonical config
+- surface conflicts
+- write Estuary config
+- sync provider-native config on startup
+- detect drift
+- pause and ask on conflicts or drift (never silently overwrite)
 
-- Claude Code
-  - permission mode
-  - dangerous skip permissions toggle
-  - allowed tools if needed
-  - additional directories if configured
+### Sync Precedence
 
-- Codex
-  - approval policy
-  - sandbox mode
-  - writable/additional dirs
-  - provider-specific safety knobs
+1. Estuary canonical config
+2. Provider-specific override sections inside Estuary config
+3. Imported provider-native config (only during onboarding or re-import)
+4. Probe results (only for validation)
 
-### Compatibility Rules
+### Drift Policy
 
-For every session, Estuary must show whether the applied mapping is:
+When provider-native config changes outside Estuary:
+- detect drift
+- ask whether to keep Estuary as source of truth or re-import provider changes
+- never silently clobber external changes after drift is detected
 
-- `Exact`
-- `Approximated`
-- `Unsupported`
+## Shared Commands
 
-If a habitat cannot represent the requested boundary profile exactly, the user must see that before the session starts.
+### Source of Truth
 
-### Setup Requirements
-
-Setup UI must allow:
-
-- default boundary profile
-- per-habitat default overrides
-- optional per-folder overrides later
-- clear unsafe labeling for `Full Access`
-
-## Habitat Settings
-
-### Scope in v1
-
-Only health + key settings.
-
-Do not attempt a full native config editor in v1.
-
-### Per-Habitat Setup Screen Must Show
-
-- installed / missing
-- authenticated / unauthenticated
-- available models
-- key paths or config file pointers
-- a small set of important toggles/settings Estuary can manage safely
-- default boundary mapping behavior
-- last successful probe timestamp
-
-### What Stays Out of Scope
-
-- exhaustive editing of every habitat-native setting
-- pretending Claude and Codex configs share one common schema
-
-## Ecosystem
-
-### Ecosystem View
-
-`Ecosystem` is the health and readiness surface.
-
-It should show:
-
-- installed habitats
-- authentication state
-- available models
-- last probe times
-- version info if useful
-- trait compatibility warnings
-- boundary translation warnings
-
-## Persistence
-
-### SQLite Tables
-
-Minimum tables:
-
-- `sessions`
-- `session_runtime`
-- `messages`
-- `events`
-- `migration_checkpoints`
-- `traits`
-- `habitat_settings`
-- `ecosystem_snapshots`
-- `boundary_profiles`
-- `session_boundary_resolutions`
-- `app_settings`
-
-### Filesystem Layout
+Commands live as individual files:
 
 ```text
-~/.estuary/
-  data/
-    estuary.db
-  logs/
-  config/
+~/.config/estuary/commands/
 ```
 
-Project repository root must also contain:
+One file = one canonical command.
 
-- `README.md`
-- `FEATURES.md`
-- `flake.nix`
-- `flake.lock`
+### File Format
 
-`README.md` references `FEATURES.md`.
-Runtime data under `~/.estuary/` must not be treated as the source of truth for repository documentation.
+```markdown
+---
+name: plan-work
+description: Turn a rough task into an implementation plan
+providers: [claude, codex]
+---
+Analyze the current repository state and produce a concrete implementation plan.
+```
 
-No app-managed workspaces or clones.
+Provider-scoped example:
 
-## TUI Technology
+```markdown
+---
+name: review-security
+description: Security-focused review
+providers: [claude]
+---
+Review these changes for security issues and concrete remediations.
+```
 
-### UI Stack
+### Required Frontmatter
 
-- Go
-- Bubble Tea
-- Lip Gloss
-- Bubbles components where useful
+- `name`
+- `description`
+- `providers` — one of: `[claude]`, `[codex]`, `[claude, codex]`
 
-### Why TUI Works
+### Command Body Rules
 
-The interface is focused on:
+- body is raw provider text
+- Estuary does not parse arguments
+- Estuary does not implement placeholders or templating
+- body is synced as-is into provider-native command files
 
-- tabs
-- one chat pane
-- settings/setup modals
-- migration flow
-- boundaries
-- traits
-- ecosystem state
+### Provider-Specific Overrides (Deferred)
 
-That fits a TUI well.
+Do not implement unless a real mismatch forces it:
+- `claude_name`, `codex_name`
+- `claude_body`, `codex_body`
 
-## Milestones
+Default: one file, one body, one metadata block, provider routing by metadata.
 
-### Milestone 1: Core Shell
+### Command Sync Behavior
 
-Goal: boot the Go TUI with persistence, ecosystem checks, and reproducible dev setup.
+During startup sync:
+- read all command files
+- validate metadata
+- route into provider-native command folders based on `providers`
+- compare per-file drift before overwrite
+- pause and ask if provider file drift is detected
 
-Deliver:
+Estuary does not expose commands as an in-app browser or invocation UI. Users invoke them inside Claude Code or Codex natively.
 
-- Go project scaffold
-- Bubble Tea shell
-- SQLite migrations
-- Ecosystem screen
-- app settings
-- Boundary profile scaffolding
-- session list scaffolding
-- initial `FEATURES.md`
-- `README.md` reference to `FEATURES.md`
-- `flake.nix` and `flake.lock`
-- documented Nix-based dev shell setup
+## Data Model Changes
 
-### Milestone 2: Session Runtime
+### Sessions Table
 
-Goal: create and persist real habitat-backed sessions.
+Keep `sessions`. Add or clarify:
+- `runtime_kind` pointing toward native terminal
+- `last_handoff_packet_id`
+- `config_sync_state`
+- `attach_strategy`
+- `resume_strategy`
+- `last_switch_type`
 
-Deliver:
+### New Persistence Tables
 
-- new session flow
-- folder picker/input
-- duplicate-folder warning
-- model discovery
-- habitat mapping
-- boundary profile selection
-- habitat-native boundary translation
-- habitat session startup
-- streaming assistant output into common timeline
-- update `FEATURES.md`
+Add:
+- `handoff_packets`
+- `config_sync_runs`
+- `config_conflicts`
+- `provider_config_sources`
+- `provider_command_sync_state`
 
-### Milestone 3: Persistence and Resume
+### Legacy Transcript Handling
 
-Goal: make sessions durable.
+- keep old `messages` and chat state for migration compatibility
+- use legacy transcript data only to generate handoffs for old sessions
+- do not invest in transcript-first UX or runtime assumptions
 
-Deliver:
+## Implementation Sequence
 
-- persisted transcript and metadata
-- resume/reopen flow
-- habitat-native resume when available
-- graceful degraded restore when only transcript is recoverable
-- update `FEATURES.md`
+### Phase 1: Spec and Docs Pivot (current)
 
-### Milestone 4: Migration
+Update `plan.md`, `README.md`, `FEATURES.md`:
+- rewrite product framing around embedded native terminals
+- define switching and shared config as the core value prop
+- document file-per-command sync model
+- mark unified chat features as legacy or slated for removal
 
-Goal: make one Estuary session portable across models/habitats.
+### Phase 2: PTY Runtime Foundation
 
-Deliver:
+Implement:
+- PTY manager (`internal/pty`)
+- terminal embedding in Bubble Tea (raw passthrough with chrome rows reserved)
+- provider terminal adapter interface
+- startup / restart / resize / input flow
+- persistence for runtime metadata
 
-- migration checkpoint service
-- model/habitat switch action
-- continuation prompt generation with minimal operational context
-- timeline notices for migration and rehydration
-- update `FEATURES.md`
+Acceptance: Estuary opens Claude or Codex in an embedded native terminal and supports real interaction.
 
-### Milestone 5: Traits
+### Phase 3: Terminal-First UI Refactor
 
-Goal: bring commands, skills, and tools into the app core.
+Implement:
+- terminal-first main view (additive rewrite of `model.go`)
+- compact always-visible header and footer
+- palette changes (`Ctrl+K` control surface)
+- old composer and transcript moved to legacy path
 
-Deliver:
+Acceptance: Estuary is operationally usable without any unified transcript or composer UI.
 
-- trait storage
-- Traits setup UI
-- compatibility metadata
-- projection into habitats where possible
-- session-level invocation hooks
-- update `FEATURES.md`
+### Phase 4: Session Persistence and Restore
 
-### Milestone 6: Boundaries and Habitat Settings Polish
+Implement:
+- native runtime session persistence
+- reopen existing session
+- best-effort native resume
+- fallback restart with handoff injection
 
-Goal: make safety and setup explicit.
+Acceptance: multiple persisted sessions can be reopened as native terminal sessions.
 
-Deliver:
+### Phase 5: Handoff and Switching
 
-- Boundary profile management UI
-- exact/approximated/unsupported mapping indicators
-- unsafe full-access labeling
-- Habitat Settings views for key settings
-- first-run setup flow
-- update `FEATURES.md`
+Implement:
+- handoff packet generation and storage (extending MigrationCheckpoint)
+- same-provider switch behavior per provider
+- cross-provider switch flow
+- degraded restore via handoff
 
-### Milestone 7: Daily-Use Polish
+Acceptance: model and provider switches preserve continuity without relying on unified transcript runtime.
 
-Goal: make the tool usable every day.
+### Phase 6: Config Onboarding / Import / Sync
 
-Deliver:
+Implement:
+- provider config detection
+- onboarding flow
+- conflict resolution
+- canonical Estuary config writing
+- startup sync
+- drift detection and ask-before-overwrite behavior
 
-- status indicators
-- better error states
-- search/filter for sessions
-- diagnostics/log view
-- help screen and keyboard shortcuts
-- update `FEATURES.md`
+Acceptance: Estuary becomes the stable source of truth for shared setup.
 
-## Public Interfaces and Types
+### Phase 7: Shared Command Directory and Provider Sync
 
-Important Go service contracts:
+Implement:
+- `~/.config/estuary/commands/` source-of-truth directory
+- frontmatter parser and validator
+- provider-native command folder writers
+- provider command import
+- per-file drift detection
 
-- `HabitatRegistry`
-- `HabitatRuntime`
-- `SessionService`
-- `ChatService`
-- `MigrationService`
-- `TraitService`
-- `HabitatConfigService`
-- `BoundaryService`
+Acceptance: user edits a command file once and sees it appear in supported provider-native command systems after startup sync.
 
-Important domain types:
+### Phase 8: Legacy Cleanup
 
-- `Session`
-- `Message`
-- `RuntimeEvent`
-- `MigrationCheckpoint`
-- `Trait`
-- `HabitatHealth`
-- `ModelDescriptor`
-- `BoundaryProfile`
-- `BoundaryResolution`
+Remove or quarantine:
+- unified chat runtime as default execution path
+- chat composer
+- slash command picker
+- trait injection flow
+- transcript-centered rendering
+
+Keep only what is necessary for legacy migration and handoff generation from old sessions.
+
+## Test Cases and Scenarios
+
+### Terminal Runtime
+
+- starts Claude native terminal
+- starts Codex native terminal
+- forwards input correctly
+- handles resize correctly
+- persists runtime metadata
+- handles native exit and restart cleanly
+
+### Sessions
+
+- create multiple sessions
+- switch between sessions
+- reopen session with native resume when possible
+- fallback to fresh start plus handoff when resume fails
+
+### Switching
+
+- Claude same-provider model switch
+- Codex same-provider model switch
+- Claude to Codex switch with handoff
+- Codex to Claude switch with handoff
+
+### Config Sync
+
+- import Claude config only
+- import Codex config only
+- import both with conflicts
+- provider-specific override preservation
+- drift detection and explicit resolution flow
+
+### Commands
+
+- parse valid command file frontmatter and body
+- reject invalid `providers` metadata
+- sync shared command to both providers
+- sync Claude-only command only to Claude
+- sync Codex-only command only to Codex
+- import provider-native command files into Estuary command files
+- detect per-file drift without global false positives
+- do not require Estuary runtime invocation support
+
+### Legacy Migration
+
+- old chat-backed session generates handoff
+- migrated session opens natively
+- old transcript remains available for migration only, not primary runtime UX
 
 ## Acceptance Criteria
 
-A v1 build is acceptable when:
+The pivot is complete when:
 
-- user can open multiple sessions in tabs
-- each session is rooted in a user-selected local folder
-- app warns when multiple live sessions target the same folder
-- user picks a model and Estuary maps the habitat
-- user picks a boundary profile and sees the resolved habitat-native mapping
-- session runs through a common chat UI
-- assistant output streams into the timeline
-- sessions persist across restarts
-- app resumes or gracefully restores sessions when possible
-- user can migrate across habitats/models inside one Estuary session
-- traits can be defined once in Estuary
-- Habitat Settings show health and key settings for Claude and Codex
-- Estuary does not inject a hidden system prompt layer
-- both light and dark themes preserve the same estuarial design language
-- `FEATURES.md` reflects the actually implemented feature set
-- `README.md` links readers to `FEATURES.md`
-- `nix develop` provides the documented Go/tooling environment after sourcing the Nix daemon profile if needed
+- Estuary's main screen is an embedded native Claude/Codex terminal
+- Estuary chrome (header + footer) is always visible around the PTY
+- user can persist and switch multiple sessions
+- model selection opens the correct provider
+- same-provider switching uses provider-specific fixed behavior
+- cross-provider switching uses structured handoff
+- Estuary imports and owns shared config
+- Estuary syncs provider-native config on startup
+- Estuary uses `~/.config/estuary/commands/` as a file-per-command source of truth
+- command files sync into provider-native command folders based on provider metadata
+- drift is detected and resolved explicitly
+- unified chat is no longer the main product contract
+- docs and feature inventory match the new product truth
 
-## Testing and Scenarios
+## Development Environment
 
-### Unit Tests
+Nix flakes remain the canonical development environment definition.
 
-- habitat mapping from model selection
-- folder conflict detection
-- session state transitions
-- migration checkpoint generation
-- boundary profile translation
-- boundary compatibility resolution
-- message/event persistence
-- trait compatibility rules
-- habitat health parsing
-- habitat-specific runtime adapters
-- theme token usage rules and semantic color mapping
-- documentation completeness checks for `FEATURES.md` presence where practical
+```bash
+source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+nix develop
+```
 
-### Integration Tests
+Then inside the shell:
 
-- create Claude-backed session from chosen folder
-- create Codex-backed session from chosen folder
-- stream output into normalized chat timeline
-- persist and restore session transcript
-- migrate habitat within one session using migration checkpoint
-- define trait and project it to supported habitat runtime
-- Ecosystem reflects actual habitat availability
-- boundary profile maps correctly into habitat-native startup settings
-- light and dark themes preserve layout hierarchy and semantic status colors
-- repository docs include `FEATURES.md` and `README.md` references it
-- Nix dev shell provides the expected Go/tooling commands
-
-### Failure Cases
-
-- Claude missing
-- Codex missing
-- habitat unauthenticated
-- selected folder missing or inaccessible
-- selected model disappears between probe and launch
-- requested boundary profile cannot be represented cleanly
-- session resume partially fails
-- migration bootstrap fails
-- trait unsupported by chosen habitat
-- dark theme contrast regression
-- habitat tint overwhelms readability in either theme
-- implemented feature not reflected in `FEATURES.md`
-- Nix shell missing required Go/tooling dependencies
+```bash
+go test ./...
+go run ./cmd/estuary
+golangci-lint run
+```
 
 ## Assumptions and Defaults
 
-- App is local-first and single-user.
-- Estuary does not manage repos or working directories beyond binding a session to an existing folder.
-- Habitats are installed separately by the user.
-- Estuary owns the common chat/session model.
-- Estuary owns the canonical Traits registry.
-- Habitat-specific config remains habitat-specific, with only key settings exposed in v1.
-- Mixed backend internals are acceptable as long as the user-facing session model stays unified.
-- Estuary preserves native habitat behavior instead of replacing it with a common system prompt.
-- User-configured Boundaries are canonical, and habitat settings are derived projections.
-- Light and dark themes share one semantic token system and one design identity.
-- `FEATURES.md` is the canonical implemented-feature ledger and must be maintained continuously.
-- Nix flakes are the canonical development environment definition for this repository.
+- PTY embedding is feasible in the current Go TUI stack.
+- Provider-native command systems are file/folder based or can be adapted through file sync.
+- Command metadata remains intentionally minimal: `name`, `description`, `providers`.
+- Command bodies are raw pass-through text with no Estuary templating.
+- Provider-scoped commands are allowed in the shared command directory.
+- Provider-specific command body or name overrides are deferred until a real incompatibility requires them.
+- Existing SQLite `traits` data does not need migration; the filesystem is the new source of truth.
+- Old transcript data is kept only for migration and handoff generation.
+- `FEATURES.md` and `README.md` must be updated alongside every shipped behavior change.
+- No PTY reattachment; users manage their own shell persistence.
+- Sessions are always restart-based; handoff packets carry continuity.

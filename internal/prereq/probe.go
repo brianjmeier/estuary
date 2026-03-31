@@ -40,10 +40,9 @@ func (p *Prober) ProbeAll(ctx context.Context) []domain.HabitatHealth {
 func (p *Prober) ProbeHabitat(ctx context.Context, habitat domain.Habitat) domain.HabitatHealth {
 	desc := descriptorFor(habitat)
 	health := domain.HabitatHealth{
-		Habitat:          habitat,
-		LastProbeAt:      time.Now(),
-		ConfigPathHint:   desc.ConfigHint,
-		BoundaryBehavior: desc.BoundaryBehavior,
+		Habitat:        habitat,
+		LastProbeAt:    time.Now(),
+		ConfigPathHint: desc.ConfigHint,
 	}
 
 	path, err := exec.LookPath(desc.Binary)

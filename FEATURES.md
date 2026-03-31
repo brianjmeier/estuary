@@ -2,73 +2,101 @@
 
 This file is the canonical index of shipped behavior in this repository.
 
-## Application Shell
+## Native Terminal Shell
 
-- `implemented` Bubble Tea shell centered on a single main transcript surface instead of a permanent multi-pane dashboard.
-- `implemented` Compact header and help strip showing the current directory, active model/habitat, and the most useful keybinds.
-- `implemented` Minimal default keybind set focused on terminal-native use: `Enter`, `Ctrl+K`, `Esc`, and `Ctrl+C`.
+- `implemented` PTY session manager (`internal/pty`): spawn, write input, resize (SIGWINCH), close, output streaming via channel.
+- `implemented` ANSI scrolling-region overlay (`internal/pty`): reserves 2-row header and 1-row footer; content area governed by `\033[top;botr`; cursor save/restore around chrome renders.
+- `implemented` Raw PTY passthrough wired into the terminal session runner (`internal/app/terminal_session.go`).
+- `implemented` PTY resize forwarding via SIGWINCH signal handler; overlay updated on every resize.
+- `implemented` Estuary chrome (header + footer) rendered live via overlay on startup, resize, and palette close.
+- `implemented` Output forwarder with pause/resume so the palette can take the terminal without visual corruption.
+- `implemented` `Ctrl+K` opens the command palette as a Bubble Tea alt-screen program; resumes PTY session on dismiss.
+- `implemented` `Ctrl+C` exits Estuary cleanly.
+- `implemented` Palette: new session, switch session, reconnect, switch model (stub), change boundary (stub), toggle theme, re-probe, quit.
+- `implemented` `cmd/estuary/main.go` updated to use `TerminalSession` as the primary entry point.
 - `implemented` Light and dark semantic theme token sets shared through one design system.
 
-## Startup And Sessions
+## Sessions
 
-- `implemented` Estuary starts a fresh session automatically in the current working directory on launch.
-- `implemented` Default startup model is `claude-sonnet-4-6`, mapped automatically to the Claude habitat.
-- `implemented` Session metadata is persisted for folder, model, habitat, boundary profile, status, migration generation, native session id, and resolved boundary settings.
-- `implemented` Session activity state is tracked separately from transcript history so historical sessions do not count as active work.
-- `implemented` Same-folder warnings are reserved for crowded active work only: a new session warns only when two or more active sessions already target that directory.
-- `implemented` `Ctrl+K` command palette lists commands and persisted sessions for switching into older work explicitly.
+- `implemented` Smart startup: reopens the most recent session for the cwd when one exists; creates fresh only when none found.
+- `implemented` Multiple persisted sessions switchable from the command palette; session list sorted by last-opened.
+- `implemented` Session restore: uses `ResumeArgs` (with `NativeSessionID`) when available; falls back to `StartArgs` otherwise.
+- `implemented` No PTY reattachment; sessions always restart the native process on reopen.
+- `implemented` PTY exit handling: overlay footer shows exit code and reconnect prompt; `r` reconnects, `^C` quits.
+- `implemented` `pty_sessions` table: persists PID, attach strategy, native session ID, exit code per PTY spawn.
+- `implemented` `TouchSession`: updates `last_opened_at` and marks session active when reopened.
+- `implemented` `sessions.FindForFolder`: finds the most recent session for a directory path.
+- `implemented` Session idle state saved when switching sessions or on PTY exit.
+- `implemented` Session metadata persistence for folder, model, provider, boundary profile, status, and native session ID.
+- `implemented` Same-folder warning when two or more active sessions target the same directory.
 
-## Chat
+## Command Palette
 
-- `implemented` Common chat timeline for user, assistant, system, tool, and migration-summary messages.
-- `implemented` Persisted user and assistant turns in SQLite.
-- `implemented` Provider-backed turn execution through streaming `claude -p` and `codex exec` runtimes.
-- `implemented` Incremental assistant deltas rendered live in the transcript while a turn is still running.
-- `implemented` Tool and runtime notices surfaced in the timeline during streaming turns.
-- `implemented` Embedded composer in the main screen, always ready for typing at launch.
-- `implemented` Composer growth behavior that expands with wrapped text up to eight visible lines before showing only the tail of the input.
-- `implemented` Graceful degraded restore when provider-native resume is rejected, with transcript-only continuation and a visible system notice.
+- `planned` `Ctrl+K` palette as the primary control surface for: new session, open/switch session, switch model, switch provider, change boundaries, reconnect/restart native session, ecosystem health, onboarding/import, config sync status, resolve config drift, command sync status.
+- `implemented` `Ctrl+K` palette covering session creation, session switching, model changes, boundary changes, traits, help, theme toggle, and habitat re-probing.
 
-## Command Palette And Settings
+## Provider Adapters
 
-- `implemented` `Ctrl+K` command palette for new session creation, session switching, model changes, boundary changes, traits, help, theme toggle, and habitat re-probing.
-- `implemented` Separate settings/help surfaces instead of putting configuration controls into the main transcript layout.
-- `partial` Session resume is explicit through the management surfaces rather than automatic at startup, but it is still represented as session switching rather than a richer dedicated resume workflow.
+- `implemented` `TerminalAdapter` interface: `StartArgs`, `ResumeArgs`, `HandoffArgs` per provider.
+- `implemented` Claude Code terminal adapter: `--resume <id>` and `--permission-mode` boundary projection.
+- `implemented` Codex terminal adapter: `-a`, `-s`, `-C`, `--model` flags; resume via `CODEX_THREAD_ID` env var.
+- `implemented` Claude habitat streaming runtime via `claude -p` (legacy path).
+- `implemented` Codex habitat streaming runtime via `codex exec` (legacy path).
 
-## Ecosystem And Habitat Settings
+## Handoff and Switching
 
-- `implemented` Habitat probing for Claude and Codex install state, version, authentication state, config hints, boundary behavior, and discovered model lists.
-- `implemented` Model discovery populates migration/model controls from installed CLI help/config probes, with manual fallback.
+- `implemented` `HandoffPacket` domain type extending `MigrationCheckpoint`: adds `RecentWorkSummary`, `FileReferences`, `SourceModel`, `SourceProvider`, `TargetModel`, `TargetProvider`, `SwitchType`, `UserNote`.
+- `implemented` `internal/handoff.Service`: generates `HandoffPacket` from live session state (delegates extraction to `migration.Service`); formats packet as injectable prompt text.
+- `implemented` Same-provider switch: `switchModel` stops current PTY, updates session model/habitat, spawns fresh PTY, injects handoff text via stdin after 3-second delay.
+- `implemented` Cross-provider switch: same flow as same-provider switch; `SwitchType` field distinguishes for analytics and future deeper integration.
+- `implemented` `handoff_packets` table: persists every generated packet for debugging and future retrieval.
+- `implemented` `Switch Model` command palette entry opens a filtered model picker (Bubble Tea alt-screen sub-program); shows current model highlighted.
+- `implemented` Model picker runs while PTY output is paused, preventing visual corruption during the selection flow.
+- `implemented` MigrationCheckpoint: objective, decisions, conversation summary, open tasks, active traits, recent tool outputs (legacy path, being extended into HandoffPacket).
+- `implemented` Continuation-context injection on first post-migration turn as a system message (legacy).
 
-## Boundaries
+## Config Sync
 
-- `implemented` Canonical boundary profiles: Ask Always, Workspace Write, Read Only, and Full Access.
-- `implemented` Boundary resolution metadata structure with exact, approximated, and unsupported compatibility states.
-- `implemented` Habitat-native translation for Claude permission mode and Codex approval/sandbox startup settings.
-- `implemented` Boundary changes happen in a dedicated control surface instead of the default chat view.
+- `planned` Estuary canonical config at `~/.config/estuary/config.yaml` as source of truth after onboarding.
+- `planned` Shared config sections: bash permissions, skills, general settings unified across providers.
+- `planned` Provider-specific override sections (`claude:`, `codex:`) within the same config file for provider-particular settings.
+- `planned` Onboarding import flow: detect Claude and Codex config sources, map overlaps, surface conflicts, write Estuary config.
+- `planned` Startup sync: write Estuary config values into provider-native config files.
+- `planned` Drift detection: detect when provider-native config changed outside Estuary; ask before overwriting.
 
-## Migration
+## Shared Commands
 
-- `implemented` Change-model flow that creates a migration checkpoint, updates the selected session’s model and habitat, clears the native session id, and logs migration events.
-- `implemented` Continuation-context injection on the first post-migration turn, visible in the transcript as a system message instead of a hidden prompt.
-- `implemented` Migration checkpoint summaries surfaced in the chat timeline as summary-role messages.
+- `planned` `~/.config/estuary/commands/` as the file-per-command source of truth.
+- `planned` Command file format: Markdown with frontmatter (`name`, `description`, `providers`).
+- `planned` Provider routing by `providers` metadata: `[claude]`, `[codex]`, or `[claude, codex]`.
+- `planned` Command body is raw pass-through text; no templating or argument preprocessing.
+- `planned` Startup sync: route command files into provider-native command folders based on `providers`.
+- `planned` Per-file drift detection before overwrite; pause and ask if drift is detected.
+- `planned` Import: read provider-native command folders during onboarding and normalize into Estuary command files.
 
-## Traits
+## Ecosystem
 
-- `implemented` SQLite-backed Traits registry for shared command, skill, and tool definitions.
-- `implemented` Trait editor modal for creating shared traits with habitat compatibility metadata.
-- `implemented` Command-trait invocation from the composer using `/trait-name`, with explicit unsupported-habitat errors instead of silent failure.
+- `implemented` Habitat probing for Claude and Codex install state, authentication, config hints, boundary behavior, and discovered model lists.
+- `implemented` Model discovery from installed CLI probes with manual fallback.
 
 ## Persistence
 
-- `implemented` SQLite store bootstrap under `~/.estuary/data/estuary.db`.
-- `implemented` Initial schema creation for sessions, session runtime, messages, events, migration checkpoints, traits, habitat settings, ecosystem snapshots, boundary profiles, session boundary resolutions, and app settings.
-- `implemented` Session runtime state persistence for active-session tracking, resume intent, and pending migration continuation context.
-- `partial` App settings persistence currently covers theme selection.
-- `implemented` Runtime event logging for session resume, turn start/completion, assistant deltas, tool lifecycle events, habitat errors, model changes, habitat changes, boundary changes, restore failures, and session close.
+- `implemented` SQLite store at `~/.estuary/data/estuary.db`.
+- `implemented` Schema for sessions, session runtime, messages, events, migration checkpoints, traits, habitat settings, ecosystem snapshots, boundary profiles, session boundary resolutions, app settings.
+- `planned` New tables: `config_sync_runs`, `config_conflicts`, `provider_config_sources`, `provider_command_sync_state`.
+- `implemented` Runtime event logging.
+- `partial` App settings persistence covers theme selection.
 
-## Documentation And Tooling
+## Legacy (Slated for Removal in Phase 8)
+
+- `legacy` Unified Estuary chat transcript as the primary main screen.
+- `legacy` Estuary-native chat composer.
+- `legacy` Slash-command picker tied to chat input (`/trait-name` syntax).
+- `legacy` Trait injection flow (SQLite-backed traits registry replaced by filesystem commands).
+- `legacy` Turn-stream chat execution through `internal/chat` and `internal/habitats`.
+
+## Documentation and Tooling
 
 - `implemented` `README.md` links to this file as the authoritative current feature index.
-- `implemented` Nix-based development workflow remains documented as the primary project-local toolchain path.
-- `implemented` Focused unit tests cover boundary profiles, habitat mapping heuristics, split habitat runtime parsing helpers, theme token completeness, session creation, and documentation linkage.
+- `implemented` Nix-based development workflow as the primary project-local toolchain path.
+- `implemented` Focused unit tests covering boundary profiles, habitat mapping, theme token completeness, session creation, and documentation linkage.

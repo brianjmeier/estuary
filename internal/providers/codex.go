@@ -146,10 +146,8 @@ func startCodexRuntime(ctx context.Context) (*codexRuntime, error) {
 
 func (r *codexRuntime) startThread(ctx context.Context, session domain.Session) (domain.ProviderSessionRef, error) {
 	result, err := r.request(ctx, "thread/start", map[string]any{
-		"cwd":            session.FolderPath,
-		"model":          session.CurrentModel,
-		"sandbox":        codexNativeSetting(session.ResolvedBoundarySettings, "sandbox_mode", "workspace-write"),
-		"approvalPolicy": codexNativeSetting(session.ResolvedBoundarySettings, "approval_policy", "on-request"),
+		"cwd":   session.FolderPath,
+		"model": session.CurrentModel,
 	})
 	if err != nil {
 		return domain.ProviderSessionRef{}, err
@@ -173,11 +171,9 @@ func (r *codexRuntime) startThread(ctx context.Context, session domain.Session) 
 
 func (r *codexRuntime) resumeThread(ctx context.Context, session domain.Session, ref domain.ProviderSessionRef) (domain.ProviderSessionRef, error) {
 	result, err := r.request(ctx, "thread/resume", map[string]any{
-		"threadId":       ref.ProviderThreadID,
-		"cwd":            session.FolderPath,
-		"model":          session.CurrentModel,
-		"sandbox":        codexNativeSetting(session.ResolvedBoundarySettings, "sandbox_mode", "workspace-write"),
-		"approvalPolicy": codexNativeSetting(session.ResolvedBoundarySettings, "approval_policy", "on-request"),
+		"threadId": ref.ProviderThreadID,
+		"cwd":      session.FolderPath,
+		"model":    session.CurrentModel,
 	})
 	if err != nil {
 		return ref, err
@@ -411,19 +407,6 @@ func codexToolName(item map[string]any) string {
 	return firstNonEmpty(stringValue(item["title"]), stringValue(item["name"]), typ)
 }
 
-func codexNativeSetting(settingsJSON, key, fallback string) string {
-	if settingsJSON == "" {
-		return fallback
-	}
-	var settings map[string]string
-	if err := json.Unmarshal([]byte(settingsJSON), &settings); err != nil {
-		return fallback
-	}
-	if value := strings.TrimSpace(settings[key]); value != "" {
-		return value
-	}
-	return fallback
-}
 
 func nestedMap(parent map[string]any, key string) map[string]any {
 	if parent == nil {
