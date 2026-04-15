@@ -26,14 +26,17 @@ func TestOverlaySetupSetsScrollRegion(t *testing.T) {
 	}
 }
 
-func TestOverlaySetupEnablesOriginMode(t *testing.T) {
+func TestOverlaySetupLeavesOriginModeAlone(t *testing.T) {
 	var buf bytes.Buffer
 	o := NewOverlay(&buf, 24, 80)
 	o.Setup()
 
 	out := buf.String()
-	if !strings.Contains(out, "\033[?6h") {
-		t.Errorf("Setup() output %q missing origin mode enable \\033[?6h", out)
+	if strings.Contains(out, "\033[?6h") || strings.Contains(out, "\033[?6l") {
+		t.Errorf("Setup() output %q unexpectedly changed origin mode", out)
+	}
+	if strings.Contains(out, "\033[?1049h") || strings.Contains(out, "\033[?1049l") {
+		t.Errorf("Setup() output %q unexpectedly toggled alternate screen", out)
 	}
 }
 
@@ -57,18 +60,14 @@ func TestOverlayRenderBarPreservesCursor(t *testing.T) {
 	}
 }
 
-func TestOverlayRenderBarTogglesOriginMode(t *testing.T) {
+func TestOverlayRenderBarUsesAbsoluteAddressingOnly(t *testing.T) {
 	var buf bytes.Buffer
 	o := NewOverlay(&buf, 24, 80)
 	o.RenderBar("test content", "divider")
 
 	out := buf.String()
-	// Must disable origin mode to reach row 1, then re-enable it.
-	if !strings.Contains(out, "\033[?6l") {
-		t.Error("RenderBar() missing origin mode disable \\033[?6l")
-	}
-	if !strings.Contains(out, "\033[?6h") {
-		t.Error("RenderBar() missing origin mode enable \\033[?6h")
+	if strings.Contains(out, "\033[?6l") || strings.Contains(out, "\033[?6h") {
+		t.Error("RenderBar() should not mutate origin mode")
 	}
 }
 

@@ -209,7 +209,7 @@ func (e *Emulator) handleCmdCSI(r *dupReader) bool {
 	}
 
 	paramBytes := []byte{}
-	for b == ';' || b == ':' || (b >= '0' && b <= '9') {
+	for b == ';' || (b >= '0' && b <= '9') {
 		paramBytes = append(paramBytes, byte(b))
 
 		b, _, err = r.ReadRune()
@@ -218,15 +218,12 @@ func (e *Emulator) handleCmdCSI(r *dupReader) bool {
 		}
 	}
 
-	paramParts := splitCSIParamParts(string(paramBytes))
+	paramParts := strings.Split(string(paramBytes), ";")
 	if len(paramParts) == 1 && paramParts[0] == "" {
 		paramParts = []string{}
 	}
 	params := make([]int, len(paramParts))
 	for i, p := range paramParts {
-		if p == "" {
-			continue
-		}
 		params[i], _ = strconv.Atoi(p)
 	}
 
@@ -353,20 +350,13 @@ func (e *Emulator) handleCmdCSI(r *dupReader) bool {
 							}
 							i += 2
 						case 2: // RGB Color
-							j := i + 2
-							if j < len(paramParts) && paramParts[j] == "" {
-								j++
-							}
-							if j+3 < len(params) && (j == i+2 || params[j] == 0) {
-								j++
-							}
-							if j+2 < len(params) {
+							if i+4 < len(params) {
 								if p == 38 {
-									fc = fc.SetColorRGB(params[j], params[j+1], params[j+2])
+									fc = fc.SetColorRGB(params[i+2], params[i+3], params[i+4])
 								} else {
-									bc = bc.SetColorRGB(params[j], params[j+1], params[j+2])
+									bc = bc.SetColorRGB(params[i+2], params[i+3], params[i+4])
 								}
-								i = j + 2
+								i += 4
 							}
 						default:
 							continue
@@ -684,10 +674,4 @@ func (e *Emulator) handleCmdOSC(r *dupReader) bool {
 	}
 
 	return true
-}
-
-func splitCSIParamParts(raw string) []string {
-	return strings.FieldsFunc(raw, func(r rune) bool {
-		return r == ';' || r == ':'
-	})
 }

@@ -1,11 +1,13 @@
 package app
 
 import (
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	xansi "github.com/charmbracelet/x/ansi"
+
+	"github.com/brianmeier/estuary/internal/domain"
 )
 
 func TestEncodeTerminalKeyCtrlC(t *testing.T) {
@@ -65,18 +67,6 @@ func TestEmbeddedViewFitsRequestedSize(t *testing.T) {
 	}
 }
 
-func TestFitTerminalLinePreservesANSIWidth(t *testing.T) {
-	line := "\x1b[38;5;208mClaude\x1b[0m"
-	got := fitTerminalLine(line, 12)
-
-	if width := xansi.StringWidth(got); width != 12 {
-		t.Fatalf("fitTerminalLine() width = %d, want %d", width, 12)
-	}
-	if stripped := xansi.Strip(got); stripped != "Claude      " {
-		t.Fatalf("fitTerminalLine() stripped = %q, want %q", stripped, "Claude      ")
-	}
-}
-
 func TestLeaderModeTogglesWithCtrlK(t *testing.T) {
 	model := &EmbeddedTerminalModel{theme: DarkTheme()}
 
@@ -99,17 +89,91 @@ func TestLeaderModeTogglesWithCtrlK(t *testing.T) {
 	}
 }
 
-func TestRenderTerminalFrameFitsANSIContent(t *testing.T) {
-	theme := DarkTheme()
-	lines := []string{
-		"\x1b[38;5;208mClaude\x1b[0m " + "\x1b[48;5;109mbar\x1b[0m",
+func TestSidebarUsesFriendlyModelAndHidesReadySections(t *testing.T) {
+	model := &EmbeddedTerminalModel{
+		theme:  DarkTheme(),
+		width:  120,
+		height: 30,
+		status: "Session ready.",
+		session: domain.Session{
+			FolderPath:     "/tmp/agenator",
+			CurrentModel:   "claude-sonnet-4-6",
+			CurrentHabitat: domain.HabitatClaude,
+		},
+		health: []domain.HabitatHealth{
+			{Habitat: domain.HabitatClaude, Installed: true, Authenticated: true},
+			{Habitat: domain.HabitatCodex, Installed: true, Authenticated: true},
+		},
 	}
 
-	view := renderTerminalFrame(theme, 40, lines)
-	if got := lipgloss.Width(view); got != 40 {
-		t.Fatalf("renderTerminalFrame() width = %d, want %d", got, 40)
+	got := model.renderInfoSidebar(28)
+	if !strings.Contains(got, "Sonnet 4.6") {
+		t.Fatalf("renderInfoSidebar() missing friendly model label: %q", got)
 	}
-	if got := lipgloss.Height(view); got != 3 {
-		t.Fatalf("renderTerminalFrame() height = %d, want %d", got, 3)
+	if strings.Contains(got, "claude-sonnet-4-6") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes raw model id: %q", got)
+	}
+	if strings.Contains(got, "[Claude]") || strings.Contains(got, "[claude]") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes provider tag: %q", got)
+	}
+	if strings.Contains(got, "Runtime") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes Runtime section: %q", got)
+	}
+	if strings.Contains(got, "Providers") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes Providers section: %q", got)
+	}
+	if strings.Contains(got, "Status") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes Status section: %q", got)
+	}
+	if !strings.Contains(got, "Ctrl+K  commands") {
+		t.Fatalf("renderInfoSidebar() missing compact command hint: %q", got)
+	}
+	if strings.Contains(got, "switch session") {
+		t.Fatalf("renderInfoSidebar() unexpectedly includes expanded shortcuts: %q", got)
+	}
+}
+
+func TestSidebarShowsExpandedLeaderShortcutsOnlyWhenActive(t *testing.T) {
+	model := &EmbeddedTerminalModel{
+		theme:        DarkTheme(),
+		status:       "Session ready.",
+		leaderActive: true,
+		session: domain.Session{
+			FolderPath:     "/tmp/agenator",
+			CurrentModel:   "claude-sonnet-4-6",
+			CurrentHabitat: domain.HabitatClaude,
+		},
+	}
+
+	got := model.renderInfoSidebar(28)
+	if !strings.Contains(got, "Leader") {
+		t.Fatalf("renderInfoSidebar() missing Leader section: %q", got)
+	}
+	if !strings.Contains(got, "s        switch session") {
+		t.Fatalf("renderInfoSidebar() missing expanded shortcut rows: %q", got)
+	}
+	if strings.Contains(got, "Active. ? help") {
+		t.Fatalf("renderInfoSidebar() still includes wrapped leader prose: %q", got)
+	}
+}
+
+func TestModelsSidebarUsesFriendlyLabelsWithoutProviders(t *testing.T) {
+	model := &EmbeddedTerminalModel{
+		theme: DarkTheme(),
+		session: domain.Session{
+			CurrentModel:   "claude-sonnet-4-6",
+			CurrentHabitat: domain.HabitatClaude,
+		},
+	}
+
+	got := model.renderModelsSidebar(40)
+	if !strings.Contains(got, "Sonnet 4.6") {
+		t.Fatalf("renderModelsSidebar() missing friendly model label: %q", got)
+	}
+	if strings.Contains(got, "claude-sonnet-4-6") {
+		t.Fatalf("renderModelsSidebar() unexpectedly includes raw model id: %q", got)
+	}
+	if strings.Contains(got, "[claude]") || strings.Contains(got, "[codex]") {
+		t.Fatalf("renderModelsSidebar() unexpectedly includes provider tag: %q", got)
 	}
 }

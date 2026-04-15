@@ -61,16 +61,6 @@ var ColorModes = []ColorMode{
 	ModeInvisible,
 }
 
-var colorModeSGRCodes = map[ColorMode]int{
-	ModeBold:      1,
-	ModeDim:       2,
-	ModeItalic:    3,
-	ModeUnderline: 4,
-	ModeBlink:     5,
-	ModeReverse:   7,
-	ModeInvisible: 8,
-}
-
 var colorMasks = []Color{
 	mask256color,
 	maskRGBcolor,
@@ -174,10 +164,10 @@ func ansiEscapeColor(c Color, ctype byte) []byte {
 // ANSIEscape sequence to set this color
 func ANSIEscape(fg Color, bg Color) []byte {
 	seq := []byte{ESC, '[', '0', 'm'}
-	for _, m := range ColorModes {
+	for i, m := range ColorModes {
 		if fg.TestMode(m) {
 			seq = append(seq, ESC, '[')
-			seq = append(seq, []byte(strconv.Itoa(colorModeSGRCodes[m]))...)
+			seq = append(seq, []byte(strconv.Itoa(1+i))...)
 			seq = append(seq, 'm')
 		}
 	}

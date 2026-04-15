@@ -7,10 +7,10 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+	"unicode"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 
 	"github.com/brianmeier/estuary/internal/domain"
@@ -310,28 +310,37 @@ func (m *EmbeddedTerminalModel) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.
 }
 
 func (m *EmbeddedTerminalModel) renderTerminalPane(width int) string {
-	innerWidth := max(1, width-2)
-	innerHeight := max(1, m.height-2)
+	style := terminalPaneStyle(m.theme)
+	innerWidth := max(1, width-style.GetHorizontalFrameSize())
+	innerHeight := max(1, m.height-style.GetVerticalFrameSize())
 
 	var lines []string
 	if m.runtime == nil || m.runtime.emulator == nil {
 		lines = wrapText(m.status, innerWidth)
 	} else {
-		frame := m.runtime.emulator.GetScreen()
-		lines = append(lines, frame.Rows...)
+		lines = append(lines, m.runtime.emulator.GetPlainScreen()...)
 	}
 
 	if len(lines) > innerHeight {
 		lines = lines[:innerHeight]
 	}
 	for i, line := range lines {
-		lines[i] = fitTerminalLine(line, innerWidth)
+		runes := []rune(line)
+		if len(runes) > innerWidth {
+			lines[i] = string(runes[:innerWidth])
+			continue
+		}
+		lines[i] = line + strings.Repeat(" ", innerWidth-len(runes))
 	}
 	for len(lines) < innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
 	}
 
-	return renderTerminalFrame(m.theme, width, lines)
+	content := strings.Join(lines, "\n")
+	return style.
+		Width(innerWidth).
+		Height(innerHeight).
+		Render(content)
 }
 
 func (m *EmbeddedTerminalModel) renderSidebarPane(width int) string {
@@ -366,29 +375,51 @@ func (m *EmbeddedTerminalModel) renderInfoSidebar(width int) string {
 		"",
 		m.panelTitle("Session"),
 		fmt.Sprintf("%s", fallback(shortDir(m.session.FolderPath), shortDir(m.cwd))),
-		fmt.Sprintf("%s  [%s]", fallback(m.session.CurrentModel, "claude-sonnet-4-6"), fallback(string(m.session.CurrentHabitat), "claude")),
-		"",
-		m.panelTitle("Runtime"),
-		m.runtimeSummary(),
-		"",
-		m.panelTitle("Shortcuts"),
-		"Ctrl+K ?  help",
-		"Ctrl+K s  switch session",
-		"Ctrl+K m  switch model",
-		"Ctrl+K r  reconnect",
-		"Ctrl+K q  quit",
+		m.displayModelName(),
 	}
 
-	if health := m.renderHealthSummary(width); health != "" {
-		lines = append(lines, "", m.panelTitle("Providers"), health)
+	if m.leaderActive {
+		lines = append(lines, "", m.panelTitle("Leader"))
+		lines = append(lines, m.renderLeaderShortcuts()...)
+	} else {
+		lines = append(lines, "", muted.Render("Ctrl+K  commands"))
 	}
 
-	lines = append(lines, "", m.panelTitle("Status"))
-	for _, line := range wrapText(m.status, width) {
-		lines = append(lines, muted.Render(line))
+	if runtime := m.runtimeNotice(); runtime != "" {
+		lines = append(lines, "", m.panelTitle("Runtime"))
+		for _, line := range wrapText(runtime, width) {
+			lines = append(lines, muted.Render(line))
+		}
+	}
+
+	if issues := m.providerIssues(); len(issues) > 0 {
+		lines = append(lines, "", m.panelTitle("Providers"))
+		for _, issue := range issues {
+			for _, line := range wrapText(issue, width) {
+				lines = append(lines, muted.Render(line))
+			}
+		}
+	}
+
+	if notice := m.sidebarNotice(); notice != "" {
+		lines = append(lines, "", m.panelTitle("Notice"))
+		for _, line := range wrapText(notice, width) {
+			lines = append(lines, muted.Render(line))
+		}
 	}
 
 	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) renderLeaderShortcuts() []string {
+	return []string{
+		formatShortcut("?", "help"),
+		formatShortcut("s", "switch session"),
+		formatShortcut("m", "switch model"),
+		formatShortcut("r", "reconnect"),
+		formatShortcut("q", "quit"),
+		formatShortcut("Ctrl+K", "cancel"),
+	}
 }
 
 func (m *EmbeddedTerminalModel) renderHelpSidebar(width int) string {
@@ -396,15 +427,16 @@ func (m *EmbeddedTerminalModel) renderHelpSidebar(width int) string {
 	lines := []string{
 		m.panelTitle("Leader Help"),
 		"",
-		"Ctrl+K ?  show help",
-		"Ctrl+K s  choose another session",
-		"Ctrl+K m  choose another model",
-		"Ctrl+K r  restart the current provider terminal",
-		"Ctrl+K q  quit Estuary",
+		formatShortcut("Ctrl+K ?", "show help"),
+		formatShortcut("Ctrl+K s", "choose another session"),
+		formatShortcut("Ctrl+K m", "choose another model"),
+		formatShortcut("Ctrl+K r", "restart provider terminal"),
+		formatShortcut("Ctrl+K q", "quit Estuary"),
+		formatShortcut("Ctrl+K", "cancel leader mode"),
 		"",
-		muted.Render("Arrow keys, Enter, Tab, Ctrl+C, and shell keys go straight to the embedded terminal."),
+		muted.Render("Arrow keys, Enter, Tab, Ctrl+C, and normal shell keys go straight to the embedded terminal."),
 		"",
-		muted.Render("Press Esc or Enter to return."),
+		muted.Render("Press Esc to return."),
 	}
 	return strings.Join(lines, "\n")
 }
@@ -446,7 +478,7 @@ func (m *EmbeddedTerminalModel) renderModelsSidebar(width int) string {
 			if i == m.overlayIndex {
 				marker = "▸ "
 			}
-			label := fmt.Sprintf("%s%s  [%s]", marker, model.ID, model.Habitat)
+			label := marker + formatModelDescriptor(model)
 			if model.ID == m.session.CurrentModel && model.Habitat == m.session.CurrentHabitat {
 				label += "  current"
 			}
@@ -461,35 +493,33 @@ func (m *EmbeddedTerminalModel) renderModelsSidebar(width int) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *EmbeddedTerminalModel) runtimeSummary() string {
+func (m *EmbeddedTerminalModel) runtimeNotice() string {
+	if m.runtime == nil && m.runtimeStarting {
+		return "Starting provider terminal."
+	}
 	if m.runtime == nil {
-		return "starting"
+		return ""
 	}
 	if m.runtime.closed {
 		if m.runtime.cmd != nil && m.runtime.cmd.ProcessState != nil {
-			return fmt.Sprintf("exited (%d)", m.runtime.cmd.ProcessState.ExitCode())
+			return fmt.Sprintf("Provider terminal exited with code %d.", m.runtime.cmd.ProcessState.ExitCode())
 		}
-		return "exited"
+		return "Provider terminal is not running."
 	}
-	return "running"
+	return ""
 }
 
-func (m *EmbeddedTerminalModel) renderHealthSummary(width int) string {
-	if len(m.health) == 0 {
-		return ""
-	}
-
-	var lines []string
+func (m *EmbeddedTerminalModel) providerIssues() []string {
+	var issues []string
 	for _, item := range m.health {
-		status := "missing"
-		if item.Installed && item.Authenticated {
-			status = "ready"
-		} else if item.Installed {
-			status = "needs auth"
+		switch {
+		case !item.Installed:
+			issues = append(issues, fmt.Sprintf("%s is not installed.", m.formatHabitat(item.Habitat)))
+		case !item.Authenticated:
+			issues = append(issues, fmt.Sprintf("%s needs authentication.", m.formatHabitat(item.Habitat)))
 		}
-		lines = append(lines, fmt.Sprintf("%s  %s", item.Habitat, status))
 	}
-	return strings.Join(lines, "\n")
+	return issues
 }
 
 func (m *EmbeddedTerminalModel) startInitialRuntimeCmd() tea.Cmd {
@@ -822,45 +852,82 @@ func terminalPaneStyle(theme Theme) lipgloss.Style {
 		Background(theme.BGSurface)
 }
 
-func fitTerminalLine(line string, width int) string {
-	if width <= 0 {
-		return ""
-	}
-	line = xansi.Truncate(line, width, "")
-	if w := xansi.StringWidth(line); w < width {
-		line += strings.Repeat(" ", width-w)
-	}
-	return line
+func formatShortcut(keys, action string) string {
+	return fmt.Sprintf("%-8s %s", keys, action)
 }
 
-func renderTerminalFrame(theme Theme, width int, lines []string) string {
-	border := lipgloss.NewStyle().Foreground(theme.BorderSoft)
-	fill := lipgloss.NewStyle().Background(theme.BGSurface)
-
-	innerWidth := max(1, width-2)
-	top := border.Render("╭" + strings.Repeat("─", innerWidth) + "╮")
-	bottom := border.Render("╰" + strings.Repeat("─", innerWidth) + "╯")
-
-	rendered := make([]string, 0, len(lines)+2)
-	rendered = append(rendered, top)
-	for _, line := range lines {
-		rendered = append(rendered,
-			border.Render("│")+renderTerminalContent(fill, fitTerminalLine(line, innerWidth), innerWidth)+border.Render("│"),
-		)
-	}
-	rendered = append(rendered, bottom)
-	return strings.Join(rendered, "\n")
+func (m *EmbeddedTerminalModel) displayModelName() string {
+	return friendlyModelLabel(m.session.CurrentModel)
 }
 
-func renderTerminalContent(fill lipgloss.Style, line string, width int) string {
-	if width <= 0 {
+func (m *EmbeddedTerminalModel) displayHabitatName() string {
+	return m.formatHabitat(m.session.CurrentHabitat)
+}
+
+func (m *EmbeddedTerminalModel) formatHabitat(h domain.Habitat) string {
+	raw := strings.TrimSpace(string(h))
+	if raw == "" {
+		return "Unknown"
+	}
+	return strings.ToUpper(raw[:1]) + raw[1:]
+}
+
+func (m *EmbeddedTerminalModel) sidebarNotice() string {
+	notice := strings.TrimSpace(m.status)
+	switch notice {
+	case "", "Session ready.", "Starting session...", "Select a session.", "Select a model.":
 		return ""
 	}
-	w := xansi.StringWidth(line)
-	if w >= width {
-		return line
+	if strings.HasPrefix(notice, "leader active:") {
+		return ""
 	}
-	return line + fill.Render(strings.Repeat(" ", width-w))
+	return notice
+}
+
+func humanizeModelName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "Default model"
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == '-' || r == '_'
+	})
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		lower := strings.ToLower(part)
+		switch lower {
+		case "gpt":
+			parts[i] = "GPT"
+		case "claude":
+			parts[i] = "Claude"
+		case "codex":
+			parts[i] = "Codex"
+		default:
+			if unicode.IsDigit(rune(part[0])) {
+				parts[i] = strings.ReplaceAll(part, "-", ".")
+			} else {
+				parts[i] = strings.ToUpper(part[:1]) + part[1:]
+			}
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func formatModelDescriptor(model domain.ModelDescriptor) string {
+	label := strings.TrimSpace(model.Label)
+	if label != "" && label != model.ID {
+		return label
+	}
+	return friendlyModelLabel(model.ID)
+}
+
+func friendlyModelLabel(modelID string) string {
+	if label := habitats.SupportedModelLabel(strings.TrimSpace(modelID)); label != "" {
+		return label
+	}
+	return humanizeModelName(modelID)
 }
 
 func (m *EmbeddedTerminalModel) panelTitle(s string) string {
