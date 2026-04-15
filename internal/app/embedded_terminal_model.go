@@ -27,7 +27,6 @@ type embeddedOverlay int
 
 const (
 	embeddedOverlayNone embeddedOverlay = iota
-	embeddedOverlayHelp
 	embeddedOverlaySessions
 	embeddedOverlayModels
 )
@@ -181,7 +180,7 @@ func (m *EmbeddedTerminalModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.String() == "ctrl+k" {
 			m.leaderActive = true
-			m.status = "leader active: ? help · s sessions · m models · r reconnect · q quit · Ctrl+K cancel"
+			m.status = leaderActiveStatus()
 			return m, nil
 		}
 		if data, ok := encodeTerminalKey(msg); ok {
@@ -211,13 +210,6 @@ func (m *EmbeddedTerminalModel) View() string {
 
 func (m *EmbeddedTerminalModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.overlay {
-	case embeddedOverlayHelp:
-		switch msg.String() {
-		case "esc", "enter", "ctrl+k":
-			m.overlay = embeddedOverlayNone
-			m.status = "Session ready."
-		}
-		return m, nil
 	case embeddedOverlaySessions:
 		items := m.sessionItems()
 		switch msg.String() {
@@ -283,10 +275,6 @@ func (m *EmbeddedTerminalModel) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.
 		m.leaderActive = false
 		m.status = "Session ready."
 		return m, nil
-	case "?":
-		m.leaderActive = false
-		m.overlay = embeddedOverlayHelp
-		return m, nil
 	case "s":
 		m.leaderActive = false
 		m.overlay = embeddedOverlaySessions
@@ -307,9 +295,13 @@ func (m *EmbeddedTerminalModel) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.
 		m.shutdownRuntime(true)
 		return m, tea.Quit
 	default:
-		m.status = "leader active: ? help · s sessions · m models · r reconnect · q quit · Ctrl+K cancel"
+		m.status = leaderActiveStatus()
 		return m, nil
 	}
+}
+
+func leaderActiveStatus() string {
+	return "leader active: s sessions · m models · r reconnect · q quit · Ctrl+K cancel"
 }
 
 func (m *EmbeddedTerminalModel) renderTerminalPane(width int) string {
@@ -358,8 +350,6 @@ func (m *EmbeddedTerminalModel) renderSidebarPane(width int) string {
 
 	var body string
 	switch m.overlay {
-	case embeddedOverlayHelp:
-		body = m.renderHelpSidebar(contentWidth)
 	case embeddedOverlaySessions:
 		body = m.renderSessionsSidebar(contentWidth)
 	case embeddedOverlayModels:
@@ -421,32 +411,12 @@ func (m *EmbeddedTerminalModel) renderInfoSidebar(width int) string {
 
 func (m *EmbeddedTerminalModel) renderLeaderShortcuts() []string {
 	return []string{
-		formatShortcut("?", "help"),
 		formatShortcut("s", "switch session"),
 		formatShortcut("m", "switch model"),
 		formatShortcut("r", "reconnect"),
 		formatShortcut("q", "quit"),
 		formatShortcut("Ctrl+K", "cancel"),
 	}
-}
-
-func (m *EmbeddedTerminalModel) renderHelpSidebar(width int) string {
-	muted := mutedStyle(m.theme)
-	lines := []string{
-		m.panelTitle("Leader Help"),
-		"",
-		formatShortcut("Ctrl+K ?", "show help"),
-		formatShortcut("Ctrl+K s", "choose another session"),
-		formatShortcut("Ctrl+K m", "choose another model"),
-		formatShortcut("Ctrl+K r", "restart provider terminal"),
-		formatShortcut("Ctrl+K q", "quit Estuary"),
-		formatShortcut("Ctrl+K", "cancel leader mode"),
-		"",
-		muted.Render("Arrow keys, Enter, Tab, Ctrl+C, and normal shell keys go straight to the embedded terminal."),
-		"",
-		muted.Render("Press Esc to return."),
-	}
-	return strings.Join(lines, "\n")
 }
 
 func (m *EmbeddedTerminalModel) renderSessionsSidebar(width int) string {

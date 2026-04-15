@@ -176,6 +176,26 @@ func TestLeaderModeTogglesWithCtrlK(t *testing.T) {
 	}
 }
 
+func TestLeaderQuestionMarkNoLongerOpensHelpOverlay(t *testing.T) {
+	model := &EmbeddedTerminalModel{
+		theme:        DarkTheme(),
+		leaderActive: true,
+		status:       leaderActiveStatus(),
+	}
+
+	gotModel, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("?")})
+	got := gotModel.(*EmbeddedTerminalModel)
+	if !got.leaderActive {
+		t.Fatal("leaderActive = false, want true after unsupported '?' leader key")
+	}
+	if got.overlay != embeddedOverlayNone {
+		t.Fatalf("overlay = %v, want embeddedOverlayNone", got.overlay)
+	}
+	if strings.Contains(got.status, "? help") {
+		t.Fatalf("status still advertises removed help shortcut: %q", got.status)
+	}
+}
+
 func TestSidebarUsesFriendlyModelAndHidesReadySections(t *testing.T) {
 	model := &EmbeddedTerminalModel{
 		theme:  DarkTheme(),
@@ -244,6 +264,9 @@ func TestSidebarShowsExpandedLeaderShortcutsOnlyWhenActive(t *testing.T) {
 	}
 	if !strings.Contains(got, "s        switch session") {
 		t.Fatalf("renderInfoSidebar() missing expanded shortcut rows: %q", got)
+	}
+	if strings.Contains(got, "?        help") {
+		t.Fatalf("renderInfoSidebar() still includes removed help shortcut: %q", got)
 	}
 	if strings.Contains(got, "Active. ? help") {
 		t.Fatalf("renderInfoSidebar() still includes wrapped leader prose: %q", got)
