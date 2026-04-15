@@ -107,6 +107,12 @@ func TestSidebarUsesFriendlyModelAndHidesReadySections(t *testing.T) {
 	}
 
 	got := model.renderInfoSidebar(28)
+	if !strings.Contains(got, "◆ Estuary") {
+		t.Fatalf("renderInfoSidebar() missing capitalized sidebar title: %q", got)
+	}
+	if strings.Contains(got, "◆ estuary") {
+		t.Fatalf("renderInfoSidebar() includes lowercase sidebar title: %q", got)
+	}
 	if !strings.Contains(got, "Sonnet 4.6") {
 		t.Fatalf("renderInfoSidebar() missing friendly model label: %q", got)
 	}
@@ -175,5 +181,70 @@ func TestModelsSidebarUsesFriendlyLabelsWithoutProviders(t *testing.T) {
 	}
 	if strings.Contains(got, "[claude]") || strings.Contains(got, "[codex]") {
 		t.Fatalf("renderModelsSidebar() unexpectedly includes provider tag: %q", got)
+	}
+}
+
+func TestSameProviderNoticeUsesFriendlyModelAndWordWrap(t *testing.T) {
+	model := &EmbeddedTerminalModel{
+		theme: DarkTheme(),
+		session: domain.Session{
+			ID:             "session-1",
+			CurrentModel:   "claude-sonnet-4-6",
+			CurrentHabitat: domain.HabitatClaude,
+		},
+	}
+
+	cmd := model.switchModelCmd(domain.ModelDescriptor{
+		ID:      "claude-opus-4-6",
+		Label:   "Opus 4.6",
+		Habitat: domain.HabitatClaude,
+	})
+
+	if cmd != nil {
+		t.Fatal("same-provider model switch returned command, want provider-native notice only")
+	}
+	if !strings.Contains(model.status, "Opus 4.6") {
+		t.Fatalf("status missing friendly model label: %q", model.status)
+	}
+	if strings.Contains(model.status, "claude-opus-4-6") {
+		t.Fatalf("status includes raw model id: %q", model.status)
+	}
+	for _, line := range wrapText(model.status, 24) {
+		if len([]rune(line)) > 24 {
+			t.Fatalf("wrapped line %q exceeds width", line)
+		}
+	}
+}
+
+func TestWrapTextKeepsWordsTogether(t *testing.T) {
+	got := wrapText("Use Claude's native model picker for Opus 4.6.", 18)
+	want := []string{"Use Claude's", "native model", "picker for Opus", "4.6."}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("wrapText() = %#v, want %#v", got, want)
+	}
+}
+
+func TestHandoffContextIncludesRecentTerminalInput(t *testing.T) {
+	model := &EmbeddedTerminalModel{}
+	model.recordTerminalInput([]byte("this conversation is about bananas"))
+	model.recordTerminalInput([]byte{'\r'})
+
+	got := strings.Join(model.handoffContextLines(), "\n")
+	if !strings.Contains(got, "Recent user terminal input:") {
+		t.Fatalf("handoff context missing input heading: %q", got)
+	}
+	if !strings.Contains(got, "- this conversation is about bananas") {
+		t.Fatalf("handoff context missing terminal input: %q", got)
+	}
+}
+
+func TestRecordTerminalInputHandlesBackspace(t *testing.T) {
+	model := &EmbeddedTerminalModel{}
+	model.recordTerminalInput([]byte("bananaz"))
+	model.recordTerminalInput([]byte{0x7f})
+	model.recordTerminalInput([]byte("s\r"))
+
+	if len(model.recentTerminalInputs) != 1 || model.recentTerminalInputs[0] != "bananas" {
+		t.Fatalf("recentTerminalInputs = %#v, want bananas", model.recentTerminalInputs)
 	}
 }

@@ -109,7 +109,7 @@ func (ts *TerminalSession) Run() error {
 	defer term.Restore(stdinFd, savedState) //nolint:errcheck
 
 	rows, cols := terminalSize()
-	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, ""); err != nil {
+	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, "", ""); err != nil {
 		return err
 	}
 
@@ -276,7 +276,7 @@ func (ts *TerminalSession) handlePTYExit(stdinFd int, savedState *term.State, fw
 	}
 }
 
-func (ts *TerminalSession) spawnPTY(rows, cols int, strategy domain.AttachStrategy, handoffPacketID string) error {
+func (ts *TerminalSession) spawnPTY(rows, cols int, strategy domain.AttachStrategy, handoffPacketID string, handoffText string) error {
 	adapter, ok := ts.adapters[ts.session.CurrentHabitat]
 	if !ok {
 		return fmt.Errorf("no terminal adapter for provider %q", ts.session.CurrentHabitat)
@@ -289,7 +289,7 @@ func (ts *TerminalSession) spawnPTY(rows, cols int, strategy domain.AttachStrate
 
 	switch strategy {
 	case domain.AttachStrategyHandoff:
-		cmd, args, env = adapter.HandoffArgs(ts.session, "")
+		cmd, args, env = adapter.HandoffArgs(ts.session, handoffText)
 	case domain.AttachStrategyResume:
 		if ts.session.NativeSessionID != "" {
 			cmd, args, env = adapter.ResumeArgs(ts.session, ts.session.NativeSessionID)
@@ -350,7 +350,7 @@ func (ts *TerminalSession) switchSession(target domain.Session) error {
 	ts.session = target
 	ts.sessionList = prependSession(target, ts.sessionList)
 	rows, cols := terminalSize()
-	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, ""); err != nil {
+	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, "", ""); err != nil {
 		return err
 	}
 	_ = ts.store.TouchSession(ts.ctx, target.ID)
@@ -361,42 +361,25 @@ func (ts *TerminalSession) reconnectPTY() error {
 	_ = ts.store.ClosePTYSession(ts.ctx, ts.ptyRecordID, 0)
 	_ = ts.ptyMgr.Close(ts.ptySess.ID)
 	rows, cols := terminalSize()
-	return ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, "")
+	return ts.spawnPTY(rows, cols, domain.AttachStrategyFresh, "", "")
 }
 
 func (ts *TerminalSession) switchModel(target domain.ModelDescriptor) error {
-	switchType := domain.SwitchTypeSameProvider
-	if target.Habitat != ts.session.CurrentHabitat {
-		switchType = domain.SwitchTypeCrossProvider
+	if target.ID == ts.session.CurrentModel && target.Habitat == ts.session.CurrentHabitat {
+		ts.renderChrome("that model is already active")
+		return nil
 	}
 
-	packet, err := ts.handoffSvc.Generate(ts.ctx, ts.session, target.ID, target.Habitat, switchType)
+	if target.Habitat == ts.session.CurrentHabitat {
+		ts.renderChrome(fmt.Sprintf("use %s's native model picker for %s", target.Habitat, formatModelDescriptor(target)))
+		_ = ts.store.AppendEvent(ts.ctx, ts.session.ID, "model.native_switch_requested",
+			map[string]any{"provider": target.Habitat, "target_model": target.ID})
+		return nil
+	}
+
+	packet, err := ts.handoffSvc.Generate(ts.ctx, ts.session, target.ID, target.Habitat, domain.SwitchTypeCrossProvider)
 	if err != nil {
 		_ = ts.store.AppendEvent(ts.ctx, ts.session.ID, "handoff.error", map[string]any{"error": err.Error()})
-	}
-
-	adapter := ts.adapters[ts.session.CurrentHabitat]
-	if target.Habitat == ts.session.CurrentHabitat {
-		if input := adapter.ModelSwitchInput(target.ID); input != "" {
-			ts.session.CurrentModel = target.ID
-			_ = ts.store.UpdateSession(ts.ctx, ts.session)
-			_ = ts.ptyMgr.Write(ts.ptySess.ID, []byte(input))
-			if packet.ID != "" {
-				injectionText := handoff.InjectionText(packet)
-				spawnedSess := ts.ptySess
-				go func() {
-					time.Sleep(500 * time.Millisecond)
-					if ts.ptySess != spawnedSess {
-						return
-					}
-					_ = ts.ptyMgr.Write(spawnedSess.ID, []byte(injectionText+"\n"))
-				}()
-				_ = ts.store.AppendEvent(ts.ctx, ts.session.ID, "handoff.injected",
-					map[string]any{"packet_id": packet.ID, "switch_type": string(switchType)})
-			}
-			ts.renderChrome("model switched")
-			return nil
-		}
 	}
 
 	_ = ts.store.ClosePTYSession(ts.ctx, ts.ptyRecordID, 0)
@@ -408,25 +391,20 @@ func (ts *TerminalSession) switchModel(target domain.ModelDescriptor) error {
 	_ = ts.store.UpdateSession(ts.ctx, ts.session)
 
 	rows, cols := terminalSize()
-	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyHandoff, packet.ID); err != nil {
+	handoffText := ""
+	if packet.ID != "" {
+		handoffText = handoff.InjectionText(packet)
+	}
+	if err := ts.spawnPTY(rows, cols, domain.AttachStrategyHandoff, packet.ID, handoffText); err != nil {
 		return err
 	}
 
 	if packet.ID != "" {
-		injectionText := handoff.InjectionText(packet)
-		spawnedSess := ts.ptySess
-		go func() {
-			time.Sleep(2 * time.Second)
-			if ts.ptySess != spawnedSess {
-				return
-			}
-			_ = ts.ptyMgr.Write(spawnedSess.ID, []byte(injectionText+"\n"))
-		}()
 		_ = ts.store.AppendEvent(ts.ctx, ts.session.ID, "handoff.injected",
-			map[string]any{"packet_id": packet.ID, "switch_type": string(switchType)})
+			map[string]any{"packet_id": packet.ID, "switch_type": string(domain.SwitchTypeCrossProvider), "mode": "startup_context"})
 	}
 
-	ts.renderChrome("model switched")
+	ts.renderChrome("provider switched with startup handoff")
 	return nil
 }
 
@@ -470,13 +448,15 @@ func (ts *TerminalSession) promptSwitchModel(stdinFd int, savedState *term.State
 	models := habitats.SupportedModels()
 	lines := []string{"Supported models:", ""}
 	for idx, model := range models {
-		current := ""
+		suffix := " handoff"
 		if model.ID == ts.session.CurrentModel && model.Habitat == ts.session.CurrentHabitat {
-			current = " (current)"
+			suffix = " current"
+		} else if model.Habitat == ts.session.CurrentHabitat {
+			suffix = " native"
 		}
-		lines = append(lines, fmt.Sprintf("%d. %s  [%s]%s", idx+1, model.ID, model.Habitat, current))
+		lines = append(lines, fmt.Sprintf("%d. %s  [%s] %s", idx+1, model.ID, model.Habitat, suffix))
 	}
-	lines = append(lines, "", "Choose a model number and press Enter. Leave blank to cancel.")
+	lines = append(lines, "", "Same-provider choices stay in the provider-native model picker. Cross-provider choices start a handoff.", "Choose a model number and press Enter. Leave blank to cancel.")
 
 	input, err := ts.promptForLine(stdinFd, savedState, lines)
 	if err != nil {

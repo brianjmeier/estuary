@@ -62,3 +62,13 @@ func TestInjectionTextIncludesStructuredContext(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatTerminalSnapshotTrimsAndLimits(t *testing.T) {
+	lines := []string{"", "first line   ", "", "", "second line"}
+
+	got := formatTerminalSnapshot(lines)
+
+	if !strings.Contains(got, "Native terminal context before handoff:\nfirst line\n\nsecond line") {
+		t.Fatalf("formatTerminalSnapshot() = %q", got)
+	}
+}

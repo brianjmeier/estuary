@@ -21,8 +21,8 @@ func TestClaudeTerminalAdapterStartArgsNoArgs(t *testing.T) {
 	if cmd != "claude" {
 		t.Errorf("StartArgs() cmd = %q, want %q", cmd, "claude")
 	}
-	if len(args) != 0 {
-		t.Errorf("StartArgs() returned unexpected args: %v", args)
+	if !containsSeq(args, "--model", "claude-sonnet-4-6") {
+		t.Errorf("StartArgs() args %v missing --model claude-sonnet-4-6", args)
 	}
 }
 
@@ -41,6 +41,21 @@ func TestClaudeTerminalAdapterResumeArgsFallback(t *testing.T) {
 	_, argsStart, _ := a.StartArgs(session)
 	if len(argsResume) != len(argsStart) {
 		t.Errorf("ResumeArgs() with empty nativeID should fall back to StartArgs: got %v, want %v", argsResume, argsStart)
+	}
+}
+
+func TestClaudeTerminalAdapterHandoffArgsUseStartupContext(t *testing.T) {
+	a := &ClaudeTerminalAdapter{}
+	_, args, _ := a.HandoffArgs(domain.Session{CurrentModel: "claude-sonnet-4-6"}, "handoff context")
+	if !containsSeq(args, "--append-system-prompt", "handoff context") {
+		t.Errorf("HandoffArgs() args %v missing --append-system-prompt handoff context", args)
+	}
+}
+
+func TestClaudeTerminalAdapterDoesNotInjectModelSlashCommand(t *testing.T) {
+	a := &ClaudeTerminalAdapter{}
+	if got := a.ModelSwitchInput("claude-opus-4-6"); got != "" {
+		t.Errorf("ModelSwitchInput() = %q, want empty", got)
 	}
 }
 
@@ -87,6 +102,15 @@ func TestCodexTerminalAdapterResumeArgsWithID(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("ResumeArgs() env %v missing CODEX_THREAD_ID=thread-xyz", env)
+	}
+}
+
+func TestCodexTerminalAdapterHandoffArgsUseStartupContext(t *testing.T) {
+	a := &CodexTerminalAdapter{}
+	session := domain.Session{FolderPath: "/project", CurrentModel: "gpt-5.4"}
+	_, args, _ := a.HandoffArgs(session, "handoff context")
+	if !containsSeq(args, "-c", `developer_instructions="handoff context"`) {
+		t.Errorf("HandoffArgs() args %v missing developer_instructions config", args)
 	}
 }
 

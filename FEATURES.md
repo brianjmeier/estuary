@@ -44,8 +44,8 @@ This file is the canonical index of shipped behavior in this repository.
 
 - `implemented` `HandoffPacket` domain type extending `MigrationCheckpoint`: adds `RecentWorkSummary`, `FileReferences`, `SourceModel`, `SourceProvider`, `TargetModel`, `TargetProvider`, `SwitchType`, `UserNote`.
 - `implemented` `internal/handoff.Service`: generates `HandoffPacket` from live session state (delegates extraction to `migration.Service`); formats packet as injectable prompt text.
-- `implemented` Same-provider switch: prefers provider-native runtime model switching when available, then injects structured handoff context.
-- `implemented` Cross-provider switch: updates the session, spawns a fresh PTY, and injects structured handoff context.
+- `implemented` Same-provider model changes stay provider-native: Estuary labels them as native actions and does not type slash commands into the provider UI.
+- `implemented` Cross-provider switch: updates the session, spawns a fresh PTY, and loads structured handoff context at provider startup so the user can type immediately.
 - `implemented` `handoff_packets` table: persists every generated packet for debugging and future retrieval.
 - `implemented` Model/session selection prompts run while PTY output is paused and buffered, preventing data loss during control flows.
 - `implemented` MigrationCheckpoint: objective, decisions, conversation summary, open tasks, active traits, recent tool outputs (legacy path, being extended into HandoffPacket).

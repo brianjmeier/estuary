@@ -1873,18 +1873,53 @@ func wrapText(text string, width int) []string {
 	}
 	var out []string
 	for _, rawLine := range strings.Split(text, "\n") {
-		runes := []rune(rawLine)
-		if len(runes) == 0 {
+		words := strings.Fields(rawLine)
+		if len(words) == 0 {
 			out = append(out, "")
 			continue
 		}
-		for len(runes) > width {
-			out = append(out, string(runes[:width]))
-			runes = runes[width:]
+		line := ""
+		for _, word := range words {
+			if line == "" {
+				chunks := splitLongWord(word, width)
+				if len(chunks) > 1 {
+					out = append(out, chunks[:len(chunks)-1]...)
+				}
+				line = chunks[len(chunks)-1]
+				continue
+			}
+			if len([]rune(line))+1+len([]rune(word)) <= width {
+				line += " " + word
+				continue
+			}
+			out = append(out, line)
+			chunks := splitLongWord(word, width)
+			if len(chunks) > 1 {
+				out = append(out, chunks[:len(chunks)-1]...)
+			}
+			line = chunks[len(chunks)-1]
 		}
-		out = append(out, string(runes))
+		if line != "" {
+			out = append(out, line)
+		}
 	}
 	return out
+}
+
+func splitLongWord(word string, width int) []string {
+	runes := []rune(word)
+	if len(runes) <= width || width <= 0 {
+		return []string{word}
+	}
+	chunks := make([]string, 0, (len(runes)+width-1)/width)
+	for len(runes) > width {
+		chunks = append(chunks, string(runes[:width]))
+		runes = runes[width:]
+	}
+	if len(runes) > 0 {
+		chunks = append(chunks, string(runes))
+	}
+	return chunks
 }
 
 func prefixLines(lines []string, prefix string) []string {

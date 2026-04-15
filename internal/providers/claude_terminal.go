@@ -10,8 +10,12 @@ func (a *ClaudeTerminalAdapter) Provider() domain.Habitat {
 }
 
 // StartArgs returns the command and args for a fresh Claude Code interactive session.
-func (a *ClaudeTerminalAdapter) StartArgs(_ domain.Session) (string, []string, []string) {
-	return "claude", nil, nil
+func (a *ClaudeTerminalAdapter) StartArgs(session domain.Session) (string, []string, []string) {
+	args := []string{}
+	if session.CurrentModel != "" {
+		args = append(args, "--model", session.CurrentModel)
+	}
+	return "claude", args, nil
 }
 
 // ResumeArgs returns args for resuming a prior Claude Code session by its native session ID.
@@ -22,14 +26,16 @@ func (a *ClaudeTerminalAdapter) ResumeArgs(session domain.Session, nativeID stri
 	return "claude", []string{"--resume", nativeID}, nil
 }
 
-// HandoffArgs returns args for a fresh session. Handoff injection is handled
-// at the application layer by writing initial input to the PTY after the process starts.
-func (a *ClaudeTerminalAdapter) HandoffArgs(session domain.Session, _ string) (string, []string, []string) {
-	return a.StartArgs(session)
+// HandoffArgs starts Claude with handoff context in the startup system prompt,
+// leaving the interactive input available immediately.
+func (a *ClaudeTerminalAdapter) HandoffArgs(session domain.Session, packetText string) (string, []string, []string) {
+	cmd, args, env := a.StartArgs(session)
+	if packetText != "" {
+		args = append(args, "--append-system-prompt", packetText)
+	}
+	return cmd, args, env
 }
 
-// ModelSwitchInput returns the /model slash command that switches Claude Code's
-// active model within a running session.
-func (a *ClaudeTerminalAdapter) ModelSwitchInput(modelID string) string {
-	return "/model " + modelID + "\n"
-}
+// ModelSwitchInput is intentionally disabled. Same-provider model switches stay
+// in the provider-native UI instead of Estuary typing slash commands into it.
+func (a *ClaudeTerminalAdapter) ModelSwitchInput(_ string) string { return "" }

@@ -1,6 +1,10 @@
 package providers
 
-import "github.com/brianmeier/estuary/internal/domain"
+import (
+	"strconv"
+
+	"github.com/brianmeier/estuary/internal/domain"
+)
 
 // CodexTerminalAdapter spawns and configures interactive Codex sessions.
 type CodexTerminalAdapter struct{}
@@ -30,10 +34,14 @@ func (a *CodexTerminalAdapter) ResumeArgs(session domain.Session, nativeID strin
 	return cmd, args, append(baseEnv, "CODEX_THREAD_ID="+nativeID)
 }
 
-// HandoffArgs returns args for a fresh session. Handoff injection is handled
-// at the application layer by writing initial input to the PTY after the process starts.
-func (a *CodexTerminalAdapter) HandoffArgs(session domain.Session, _ string) (string, []string, []string) {
-	return a.StartArgs(session)
+// HandoffArgs starts Codex with handoff context as developer instructions,
+// leaving the interactive input available immediately.
+func (a *CodexTerminalAdapter) HandoffArgs(session domain.Session, packetText string) (string, []string, []string) {
+	cmd, args, env := a.StartArgs(session)
+	if packetText != "" {
+		args = append(args, "-c", "developer_instructions="+strconv.Quote(packetText))
+	}
+	return cmd, args, env
 }
 
 // ModelSwitchInput returns "" because Codex selects the model at startup via

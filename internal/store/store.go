@@ -71,7 +71,55 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("apply schema upgrade: %w", err)
 		}
 	}
+	if err := s.ensureHandoffPacketsSchema(ctx); err != nil {
+		return err
+	}
 	return s.backfillProviderSessions(ctx)
+}
+
+func (s *Store) ensureHandoffPacketsSchema(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(handoff_packets)`)
+	if err != nil {
+		return fmt.Errorf("inspect handoff packets schema: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return fmt.Errorf("scan handoff packets schema: %w", err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read handoff packets schema: %w", err)
+	}
+	if columns["payload_json"] && columns["switch_type"] {
+		return nil
+	}
+
+	legacyName := fmt.Sprintf("handoff_packets_legacy_%d", time.Now().UTC().UnixNano())
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE handoff_packets RENAME TO %s`, legacyName)); err != nil {
+		return fmt.Errorf("archive legacy handoff packets: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, createHandoffPacketsTable); err != nil {
+		return fmt.Errorf("create handoff packets table: %w", err)
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf(`
+		INSERT INTO handoff_packets
+			(id, session_id, source_model, source_provider, target_model, target_provider, switch_type, payload_json, created_at)
+		SELECT id, session_id, source_model, source_provider, target_model, target_provider, '', '{}', created_at
+		FROM %s
+	`, legacyName))
+	if err != nil {
+		return fmt.Errorf("copy legacy handoff packets: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) seedAppSettings(ctx context.Context) error {
@@ -165,17 +213,17 @@ func (s *Store) CreateSession(ctx context.Context, draft domain.SessionDraft, ha
 	now := time.Now().UTC()
 
 	session := domain.Session{
-		ID:           uuid.NewString(),
-		Title:        filepath.Base(draft.FolderPath),
-		FolderPath:   draft.FolderPath,
-		CurrentModel: draft.Model,
+		ID:              uuid.NewString(),
+		Title:           filepath.Base(draft.FolderPath),
+		FolderPath:      draft.FolderPath,
+		CurrentModel:    draft.Model,
 		ModelDescriptor: domain.ModelDescriptor{ID: draft.Model, Label: draft.Model, Habitat: habitat},
-		CurrentHabitat: habitat,
-		RuntimeKind:  domain.SessionRuntimeKindProviderSession,
-		Status:       domain.SessionStatusIdle,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		LastOpenedAt: now,
+		CurrentHabitat:  habitat,
+		RuntimeKind:     domain.SessionRuntimeKindProviderSession,
+		Status:          domain.SessionStatusIdle,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		LastOpenedAt:    now,
 	}
 	if session.Title == "." || session.Title == string(filepath.Separator) || session.Title == "" {
 		session.Title = draft.FolderPath

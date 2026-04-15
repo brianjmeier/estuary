@@ -1,5 +1,17 @@
 package store
 
+const createHandoffPacketsTable = `CREATE TABLE IF NOT EXISTS handoff_packets (
+		id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		source_model TEXT NOT NULL,
+		source_provider TEXT NOT NULL,
+		target_model TEXT NOT NULL,
+		target_provider TEXT NOT NULL,
+		switch_type TEXT NOT NULL,
+		payload_json TEXT NOT NULL,
+		created_at TIMESTAMP NOT NULL
+	);`
+
 var schema = []string{
 	`CREATE TABLE IF NOT EXISTS sessions (
 		id TEXT PRIMARY KEY,
@@ -131,17 +143,7 @@ var schema = []string{
 	);`,
 	// handoff_packets stores context snapshots used when switching model or provider.
 	// payload_json is the full HandoffPacket serialized as JSON.
-	`CREATE TABLE IF NOT EXISTS handoff_packets (
-		id TEXT PRIMARY KEY,
-		session_id TEXT NOT NULL,
-		source_model TEXT NOT NULL,
-		source_provider TEXT NOT NULL,
-		target_model TEXT NOT NULL,
-		target_provider TEXT NOT NULL,
-		switch_type TEXT NOT NULL,
-		payload_json TEXT NOT NULL,
-		created_at TIMESTAMP NOT NULL
-	);`,
+	createHandoffPacketsTable,
 	// pty_sessions tracks live PTY-backed native provider sessions.
 	// attach_strategy: "fresh" | "resume" | "handoff"
 	// status: "running" | "exited" | "killed"

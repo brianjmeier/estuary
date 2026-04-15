@@ -30,6 +30,12 @@ func NewService(st *store.Store) *Service {
 // model and provider. It uses BuildCheckpoint (no extra DB write) and persists
 // only the packet itself.
 func (s *Service) Generate(ctx context.Context, session domain.Session, targetModel string, targetProvider domain.Habitat, switchType domain.SwitchType) (domain.HandoffPacket, error) {
+	return s.GenerateWithTerminalSnapshot(ctx, session, targetModel, targetProvider, switchType, nil)
+}
+
+// GenerateWithTerminalSnapshot creates a HandoffPacket and includes native
+// terminal context when structured transcript messages are unavailable.
+func (s *Service) GenerateWithTerminalSnapshot(ctx context.Context, session domain.Session, targetModel string, targetProvider domain.Habitat, switchType domain.SwitchType, terminalSnapshot []string) (domain.HandoffPacket, error) {
 	checkpoint, err := s.migSvc.BuildCheckpoint(ctx, session, nil)
 	if err != nil {
 		return domain.HandoffPacket{}, fmt.Errorf("checkpoint: %w", err)
@@ -48,6 +54,7 @@ func (s *Service) Generate(ctx context.Context, session domain.Session, targetMo
 		TargetModel:         targetModel,
 		TargetProvider:      targetProvider,
 		SwitchType:          switchType,
+		UserNote:            formatTerminalSnapshot(terminalSnapshot),
 	}
 
 	if err := s.store.SaveHandoffPacket(ctx, packet); err != nil {
@@ -136,4 +143,46 @@ func containsString(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func formatTerminalSnapshot(lines []string) string {
+	if len(lines) == 0 {
+		return ""
+	}
+	cleaned := make([]string, 0, len(lines))
+	blankRun := 0
+	for _, line := range lines {
+		line = strings.TrimRight(line, " \t\r\n")
+		if strings.TrimSpace(line) == "" {
+			blankRun++
+			if blankRun <= 1 && len(cleaned) > 0 {
+				cleaned = append(cleaned, "")
+			}
+			continue
+		}
+		blankRun = 0
+		cleaned = append(cleaned, line)
+	}
+	for len(cleaned) > 0 && strings.TrimSpace(cleaned[0]) == "" {
+		cleaned = cleaned[1:]
+	}
+	for len(cleaned) > 0 && strings.TrimSpace(cleaned[len(cleaned)-1]) == "" {
+		cleaned = cleaned[:len(cleaned)-1]
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	if len(cleaned) > 30 {
+		cleaned = cleaned[len(cleaned)-30:]
+	}
+	text := strings.Join(cleaned, "\n")
+	const maxSnapshotBytes = 6000
+	if len(text) > maxSnapshotBytes {
+		text = text[len(text)-maxSnapshotBytes:]
+		if idx := strings.IndexByte(text, '\n'); idx >= 0 && idx < len(text)-1 {
+			text = text[idx+1:]
+		}
+		text = "[terminal snapshot truncated]\n" + text
+	}
+	return "Native terminal context before handoff:\n" + text
 }

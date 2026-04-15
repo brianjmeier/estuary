@@ -75,6 +75,9 @@ type EmbeddedTerminalModel struct {
 	overlay         embeddedOverlay
 	overlayIndex    int
 	leaderActive    bool
+
+	pendingTerminalInput string
+	recentTerminalInputs []string
 }
 
 func NewEmbeddedTerminalModel(ctx context.Context, cwd string, st *store.Store, prober *prereq.Prober) (*EmbeddedTerminalModel, error) {
@@ -371,7 +374,7 @@ func (m *EmbeddedTerminalModel) renderInfoSidebar(width int) string {
 	muted := mutedStyle(m.theme)
 
 	lines := []string{
-		accent.Render("◆ estuary"),
+		accent.Render("◆ Estuary"),
 		"",
 		m.panelTitle("Session"),
 		fmt.Sprintf("%s", fallback(shortDir(m.session.FolderPath), shortDir(m.cwd))),
@@ -481,6 +484,10 @@ func (m *EmbeddedTerminalModel) renderModelsSidebar(width int) string {
 			label := marker + formatModelDescriptor(model)
 			if model.ID == m.session.CurrentModel && model.Habitat == m.session.CurrentHabitat {
 				label += "  current"
+			} else if model.Habitat == m.session.CurrentHabitat {
+				label += "  native"
+			} else {
+				label += "  handoff"
 			}
 			if i == m.overlayIndex {
 				lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.AccentWater).Bold(true).Render(label))
@@ -489,7 +496,8 @@ func (m *EmbeddedTerminalModel) renderModelsSidebar(width int) string {
 			}
 		}
 	}
-	lines = append(lines, "", mutedStyle(m.theme).Render("↑↓ move · enter select · esc cancel"))
+	lines = append(lines, "", mutedStyle(m.theme).Render("same provider: use native picker · other provider: startup handoff"))
+	lines = append(lines, mutedStyle(m.theme).Render("↑↓ move · enter select · esc cancel"))
 	return strings.Join(lines, "\n")
 }
 
@@ -532,7 +540,7 @@ func (m *EmbeddedTerminalModel) startInitialRuntimeCmd() tea.Cmd {
 		if err := m.store.TouchSession(m.ctx, session.ID); err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
-		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "")
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "", "")
 		if err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
@@ -561,7 +569,7 @@ func (m *EmbeddedTerminalModel) reconnectCmd() tea.Cmd {
 		if err := m.store.TouchSession(m.ctx, session.ID); err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
-		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "")
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "", "")
 		if err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
@@ -592,7 +600,7 @@ func (m *EmbeddedTerminalModel) switchSessionCmd(target domain.Session) tea.Cmd 
 		if err := m.store.TouchSession(m.ctx, target.ID); err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
-		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, target, cols, rows, domain.AttachStrategyFresh, "")
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, target, cols, rows, domain.AttachStrategyFresh, "", "")
 		if err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
@@ -618,38 +626,27 @@ func (m *EmbeddedTerminalModel) switchModelCmd(target domain.ModelDescriptor) te
 		return nil
 	}
 
-	switchType := domain.SwitchTypeSameProvider
-	if target.Habitat != m.session.CurrentHabitat {
-		switchType = domain.SwitchTypeCrossProvider
-	}
-
-	packet, err := m.handoffSvc.Generate(m.ctx, m.session, target.ID, target.Habitat, switchType)
-	if err != nil {
-		_ = m.store.AppendEvent(m.ctx, m.session.ID, "handoff.error", map[string]any{"error": err.Error()})
-	}
-
-	adapter := m.adapters[m.session.CurrentHabitat]
-	if adapter == nil {
-		m.status = fmt.Sprintf("No adapter for %s.", m.session.CurrentHabitat)
-		return nil
-	}
-	if input := adapter.ModelSwitchInput(target.ID); input != "" && m.runtime != nil && !m.runtime.closed {
-		m.session.CurrentModel = target.ID
-		m.session.CurrentHabitat = target.Habitat
-		if err := m.store.UpdateSession(m.ctx, m.session); err != nil {
-			m.status = fmt.Sprintf("Update model failed: %v", err)
-			return nil
-		}
-		m.writeToRuntime([]byte(input))
-		if packet.ID != "" {
-			m.injectAfter(m.runtime, handoff.InjectionText(packet), 500*time.Millisecond)
-			_ = m.store.AppendEvent(m.ctx, m.session.ID, "handoff.injected", map[string]any{
-				"packet_id":   packet.ID,
-				"switch_type": string(switchType),
+	if target.Habitat == m.session.CurrentHabitat {
+		m.status = fmt.Sprintf("Use %s's native model picker for %s. Handoff only runs across providers.", m.formatHabitat(target.Habitat), formatModelDescriptor(target))
+		if m.store != nil {
+			_ = m.store.AppendEvent(m.ctx, m.session.ID, "model.native_switch_requested", map[string]any{
+				"provider":     target.Habitat,
+				"target_model": target.ID,
 			})
 		}
-		m.status = fmt.Sprintf("Switched to %s.", target.ID)
 		return nil
+	}
+
+	packet, err := m.handoffSvc.GenerateWithTerminalSnapshot(
+		m.ctx,
+		m.session,
+		target.ID,
+		target.Habitat,
+		domain.SwitchTypeCrossProvider,
+		m.handoffContextLines(),
+	)
+	if err != nil {
+		_ = m.store.AppendEvent(m.ctx, m.session.ID, "handoff.error", map[string]any{"error": err.Error()})
 	}
 
 	session := m.session
@@ -667,13 +664,13 @@ func (m *EmbeddedTerminalModel) switchModelCmd(target domain.ModelDescriptor) te
 	m.shutdownRuntime(true)
 	cols, rows := m.currentTerminalSize()
 
-	injectionText := ""
+	handoffText := ""
 	if packet.ID != "" {
-		injectionText = handoff.InjectionText(packet)
+		handoffText = handoff.InjectionText(packet)
 	}
 
 	return func() tea.Msg {
-		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyHandoff, packet.ID)
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyHandoff, packet.ID, handoffText)
 		if err != nil {
 			return embeddedRuntimeStartedMsg{err: err}
 		}
@@ -684,16 +681,15 @@ func (m *EmbeddedTerminalModel) switchModelCmd(target domain.ModelDescriptor) te
 		if packet.ID != "" {
 			_ = m.store.AppendEvent(m.ctx, session.ID, "handoff.injected", map[string]any{
 				"packet_id":   packet.ID,
-				"switch_type": string(switchType),
+				"switch_type": string(domain.SwitchTypeCrossProvider),
+				"mode":        "startup_context",
 			})
 		}
 		return embeddedRuntimeStartedMsg{
-			session:        session,
-			sessionList:    sessionList,
-			runtime:        runtime,
-			injectionText:  injectionText,
-			injectionDelay: 1200 * time.Millisecond,
-			status:         fmt.Sprintf("Switched to %s.", target.ID),
+			session:     session,
+			sessionList: sessionList,
+			runtime:     runtime,
+			status:      fmt.Sprintf("Switched to %s with startup handoff. You can type immediately.", target.ID),
 		}
 	}
 }
@@ -709,6 +705,34 @@ func (m *EmbeddedTerminalModel) injectAfter(runtime *embeddedRuntime, text strin
 		}
 		_, _ = current.emulator.Write([]byte(text + "\n"))
 	}(runtime)
+}
+
+func (m *EmbeddedTerminalModel) terminalSnapshot() []string {
+	if m.runtime == nil || m.runtime.closed || m.runtime.emulator == nil {
+		return nil
+	}
+	return m.runtime.emulator.GetPlainScreen()
+}
+
+func (m *EmbeddedTerminalModel) handoffContextLines() []string {
+	var lines []string
+	if len(m.recentTerminalInputs) > 0 || strings.TrimSpace(m.pendingTerminalInput) != "" {
+		lines = append(lines, "Recent user terminal input:")
+		for _, input := range m.recentTerminalInputs {
+			lines = append(lines, "- "+input)
+		}
+		if pending := strings.TrimSpace(m.pendingTerminalInput); pending != "" {
+			lines = append(lines, "- "+pending+" [unsubmitted]")
+		}
+	}
+	if snapshot := m.terminalSnapshot(); len(snapshot) > 0 {
+		if len(lines) > 0 {
+			lines = append(lines, "")
+		}
+		lines = append(lines, "Visible terminal:")
+		lines = append(lines, snapshot...)
+	}
+	return lines
 }
 
 func (m *EmbeddedTerminalModel) handleRuntimeExit() {
@@ -763,10 +787,45 @@ func (m *EmbeddedTerminalModel) writeToRuntime(data []byte) {
 	if len(data) == 0 || m.runtime == nil || m.runtime.closed || m.runtime.emulator == nil {
 		return
 	}
+	m.recordTerminalInput(data)
 	if m.trace != nil {
 		m.trace.Logf("stdin forwarded=%s", traceBytes(data))
 	}
 	_, _ = m.runtime.emulator.Write(data)
+}
+
+func (m *EmbeddedTerminalModel) recordTerminalInput(data []byte) {
+	for _, b := range data {
+		switch {
+		case b == '\r' || b == '\n':
+			m.commitTerminalInput()
+		case b == 0x7f || b == '\b':
+			m.pendingTerminalInput = trimLastRune(m.pendingTerminalInput)
+		case b == '\t':
+			m.pendingTerminalInput += "\t"
+		case b >= 0x20 && b != 0x7f:
+			m.pendingTerminalInput += string(rune(b))
+		default:
+			// Ignore control and escape sequences. They are terminal navigation,
+			// not durable user context for a provider handoff.
+		}
+	}
+	if len([]rune(m.pendingTerminalInput)) > 1000 {
+		runes := []rune(m.pendingTerminalInput)
+		m.pendingTerminalInput = string(runes[len(runes)-1000:])
+	}
+}
+
+func (m *EmbeddedTerminalModel) commitTerminalInput() {
+	line := strings.TrimSpace(m.pendingTerminalInput)
+	m.pendingTerminalInput = ""
+	if line == "" {
+		return
+	}
+	m.recentTerminalInputs = append(m.recentTerminalInputs, line)
+	if len(m.recentTerminalInputs) > 12 {
+		m.recentTerminalInputs = m.recentTerminalInputs[len(m.recentTerminalInputs)-12:]
+	}
 }
 
 func (m *EmbeddedTerminalModel) findOrCreateSession() (domain.Session, error) {
@@ -943,6 +1002,7 @@ func launchEmbeddedRuntime(
 	rows int,
 	strategy domain.AttachStrategy,
 	handoffPacketID string,
+	handoffText string,
 ) (*embeddedRuntime, error) {
 	adapter, ok := adapters[session.CurrentHabitat]
 	if !ok {
@@ -956,7 +1016,7 @@ func launchEmbeddedRuntime(
 
 	switch strategy {
 	case domain.AttachStrategyHandoff:
-		command, args, env = adapter.HandoffArgs(session, "")
+		command, args, env = adapter.HandoffArgs(session, handoffText)
 	case domain.AttachStrategyResume:
 		if session.NativeSessionID != "" {
 			command, args, env = adapter.ResumeArgs(session, session.NativeSessionID)
