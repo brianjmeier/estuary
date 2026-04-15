@@ -1,9 +1,11 @@
 package emulator
 
 import (
+	"bytes"
 	"image/color"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -127,6 +129,27 @@ func TestNonTitleOSCSequencesStillReachEmulator(t *testing.T) {
 	}
 }
 
+func TestTerminalQueryResponsesAreForwardedToInput(t *testing.T) {
+	emu := newTestEmulator(t, 40, 3)
+	input := &lockedBuffer{}
+	emu.mu.Lock()
+	emu.input = input
+	emu.mu.Unlock()
+
+	if _, err := emu.FeedOutput([]byte("\x1b[c")); err != nil {
+		t.Fatalf("FeedOutput() error = %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(input.String(), "\x1b[?62;1;6;22c") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("terminal response was not forwarded to child input, got %q", input.String())
+}
+
 func TestResizeUpdatesEmulatorAndPTYSize(t *testing.T) {
 	emu := newTestEmulator(t, 10, 4)
 
@@ -214,4 +237,21 @@ func assertEnv(t *testing.T, env []string, key, want string) {
 		}
 	}
 	t.Fatalf("%s missing from env", key)
+}
+
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }

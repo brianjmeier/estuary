@@ -3,6 +3,7 @@ package emulator
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -25,6 +26,7 @@ type Emulator struct {
 	term *vt.Emulator
 
 	pty, tty *os.File
+	input    io.Writer
 
 	cmd           *exec.Cmd
 	processExited bool
@@ -52,10 +54,11 @@ func New(cols, rows int) (*Emulator, error) {
 	}
 
 	e := &Emulator{
-		id:   uuid.NewString(),
-		term: vt.NewEmulator(cols, rows),
-		pty:  ptmx,
-		tty:  tty,
+		id:    uuid.NewString(),
+		term:  vt.NewEmulator(cols, rows),
+		pty:   ptmx,
+		tty:   tty,
+		input: ptmx,
 	}
 
 	if err := e.resize(cols, rows); err != nil {
@@ -64,6 +67,7 @@ func New(cols, rows int) (*Emulator, error) {
 	}
 
 	go e.ptyReadLoop()
+	go e.terminalResponseLoop()
 
 	return e, nil
 }
@@ -204,7 +208,7 @@ func (e *Emulator) Write(data []byte) (int, error) {
 	if e.pty == nil {
 		return 0, ErrPTYNotInitialized
 	}
-	return e.pty.Write(data)
+	return e.writeInput(data)
 }
 
 // SendKey sends a key sequence to the child PTY.
@@ -257,6 +261,30 @@ func (e *Emulator) ptyReadLoop() {
 			return
 		}
 	}
+}
+
+func (e *Emulator) terminalResponseLoop() {
+	buf := make([]byte, 4096)
+	for {
+		n, err := e.term.Read(buf)
+		if n > 0 {
+			chunk := make([]byte, n)
+			copy(chunk, buf[:n])
+			e.mu.RLock()
+			_, _ = e.writeInput(chunk)
+			e.mu.RUnlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (e *Emulator) writeInput(data []byte) (int, error) {
+	if e.input == nil {
+		return 0, ErrPTYNotInitialized
+	}
+	return e.input.Write(data)
 }
 
 func renderRows(rendered string, rows int) []string {
