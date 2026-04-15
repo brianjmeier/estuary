@@ -71,6 +71,62 @@ func TestGetScreenReturnsANSIRenderedRows(t *testing.T) {
 	}
 }
 
+func TestOSCWindowTitleDoesNotRenderAsTerminalContent(t *testing.T) {
+	emu := newTestEmulator(t, 40, 3)
+
+	if _, err := emu.FeedOutput([]byte("\x1b]0;✳ Claude Code\a\x1b[38;2;215;119;87m ▐\x1b[39m")); err != nil {
+		t.Fatalf("FeedOutput() error = %v", err)
+	}
+
+	row := ansi.Strip(emu.GetScreen().Rows[0])
+	if strings.Contains(row, "Claude Code") {
+		t.Fatalf("OSC window title leaked into terminal row: %q", row)
+	}
+	if !strings.HasPrefix(row, " ▐") {
+		t.Fatalf("first row = %q, want logo prefix", row)
+	}
+}
+
+func TestOSCWindowTitleFilterHandlesChunkBoundaries(t *testing.T) {
+	emu := newTestEmulator(t, 40, 3)
+
+	chunks := [][]byte{
+		[]byte("\x1b]0;✳"),
+		[]byte(" Claude Code"),
+		[]byte("\a"),
+		[]byte("ready"),
+	}
+	for _, chunk := range chunks {
+		if _, err := emu.FeedOutput(chunk); err != nil {
+			t.Fatalf("FeedOutput(%q) error = %v", chunk, err)
+		}
+	}
+
+	row := ansi.Strip(emu.GetScreen().Rows[0])
+	if strings.Contains(row, "Claude Code") {
+		t.Fatalf("split OSC window title leaked into terminal row: %q", row)
+	}
+	if !strings.HasPrefix(row, "ready") {
+		t.Fatalf("first row = %q, want ready prefix", row)
+	}
+}
+
+func TestNonTitleOSCSequencesStillReachEmulator(t *testing.T) {
+	emu := newTestEmulator(t, 40, 3)
+
+	if _, err := emu.FeedOutput([]byte("\x1b]8;https://example.test;\alink\x1b]8;;\a")); err != nil {
+		t.Fatalf("FeedOutput() error = %v", err)
+	}
+
+	cell := emu.term.CellAt(0, 0)
+	if cell == nil {
+		t.Fatal("CellAt(0, 0) = nil")
+	}
+	if cell.Link.URL != "https://example.test" {
+		t.Fatalf("hyperlink URL = %q, want https://example.test", cell.Link.URL)
+	}
+}
+
 func TestResizeUpdatesEmulatorAndPTYSize(t *testing.T) {
 	emu := newTestEmulator(t, 10, 4)
 

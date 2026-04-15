@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,6 +29,7 @@ type Emulator struct {
 	cmd           *exec.Cmd
 	processExited bool
 	onExit        func(string)
+	pendingOutput []byte
 
 	closeOnce sync.Once
 }
@@ -121,7 +123,14 @@ func (e *Emulator) FeedOutput(data []byte) (int, error) {
 	if e.term == nil {
 		return 0, ErrPTYNotInitialized
 	}
-	return e.term.Write(data)
+	filtered := e.filterProviderOutput(data)
+	if len(filtered) == 0 {
+		return len(data), nil
+	}
+	if _, err := e.term.Write(filtered); err != nil {
+		return 0, err
+	}
+	return len(data), nil
 }
 
 // SetOnExit sets a callback that is called when the child process exits.
@@ -259,4 +268,76 @@ func renderRows(rendered string, rows int) []string {
 		out = append(out, "")
 	}
 	return out
+}
+
+func (e *Emulator) filterProviderOutput(data []byte) []byte {
+	if len(e.pendingOutput) > 0 {
+		merged := make([]byte, 0, len(e.pendingOutput)+len(data))
+		merged = append(merged, e.pendingOutput...)
+		merged = append(merged, data...)
+		data = merged
+		e.pendingOutput = nil
+	}
+
+	out := make([]byte, 0, len(data))
+	for i := 0; i < len(data); {
+		if data[i] != 0x1b {
+			out = append(out, data[i])
+			i++
+			continue
+		}
+		if i+1 >= len(data) {
+			e.pendingOutput = append(e.pendingOutput, data[i:]...)
+			return out
+		}
+		if data[i+1] != ']' {
+			out = append(out, data[i])
+			i++
+			continue
+		}
+
+		end, ok := oscEnd(data, i+2)
+		if !ok {
+			e.pendingOutput = append(e.pendingOutput, data[i:]...)
+			return out
+		}
+		seq := data[i:end]
+		if !isTitleOSC(seq) {
+			out = append(out, seq...)
+		}
+		i = end
+	}
+
+	return out
+}
+
+func oscEnd(data []byte, start int) (int, bool) {
+	for i := start; i < len(data); i++ {
+		switch data[i] {
+		case 0x07:
+			return i + 1, true
+		case 0x1b:
+			if i+1 >= len(data) {
+				return 0, false
+			}
+			if data[i+1] == '\\' {
+				return i + 2, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func isTitleOSC(seq []byte) bool {
+	if len(seq) < 3 || seq[0] != 0x1b || seq[1] != ']' {
+		return false
+	}
+	body := seq[2:]
+	if len(body) > 0 && body[len(body)-1] == 0x07 {
+		body = body[:len(body)-1]
+	} else if len(body) >= 2 && body[len(body)-2] == 0x1b && body[len(body)-1] == '\\' {
+		body = body[:len(body)-2]
+	}
+	cmd, _, _ := bytes.Cut(body, []byte(";"))
+	return bytes.Equal(cmd, []byte("0")) || bytes.Equal(cmd, []byte("1")) || bytes.Equal(cmd, []byte("2"))
 }
