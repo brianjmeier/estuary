@@ -44,12 +44,14 @@ Estuary requires `claude` and `codex` CLIs to be installed separately. It will p
 When you open Estuary:
 
 - the main screen is a full native terminal running Claude Code or Codex
-- Estuary reserves the top two rows for status (session, directory, model, provider, boundary, sync state) and one bottom row for keybind hints
-- `Ctrl+K` opens the command palette for session management, model switching, provider switching, boundary changes, and config sync
+- Estuary leaves scrolling and the visible terminal surface entirely to the native PTY session
+- Estuary chrome lives out of band via tmux pane titles or plain terminal window titles
+- `Ctrl+K` is a minimal leader for help, session switching, model switching, reconnect, and quit
 
 When you switch providers (e.g., Claude to Codex):
 
 - Estuary generates a handoff packet from the current session context
+- includes recent decisions, open tasks, tool outputs, and file references in that handoff
 - starts the target provider natively with that context injected
 - persists the runtime metadata so you can reopen it later
 

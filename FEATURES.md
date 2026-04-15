@@ -5,24 +5,21 @@ This file is the canonical index of shipped behavior in this repository.
 ## Native Terminal Shell
 
 - `implemented` PTY session manager (`internal/pty`): spawn, write input, resize (SIGWINCH), close, output streaming via channel.
-- `implemented` ANSI scrolling-region overlay (`internal/pty`): reserves 2-row header and 1-row footer; content area governed by `\033[top;botr`; cursor save/restore around chrome renders.
 - `implemented` Raw PTY passthrough wired into the terminal session runner (`internal/app/terminal_session.go`).
-- `implemented` PTY resize forwarding via SIGWINCH signal handler; overlay updated on every resize.
-- `implemented` Estuary chrome (header + footer) rendered live via overlay on startup, resize, and palette close.
-- `implemented` Output forwarder with pause/resume so the palette can take the terminal without visual corruption.
-- `implemented` `Ctrl+K` opens the command palette as a Bubble Tea alt-screen program; resumes PTY session on dismiss.
-- `implemented` `Ctrl+C` exits Estuary cleanly.
-- `implemented` Palette: new session, switch session, reconnect, switch model (stub), change boundary (stub), toggle theme, re-probe, quit.
+- `implemented` PTY resize forwarding via SIGWINCH signal handler with full-terminal ownership by the child process.
+- `implemented` Host chrome abstraction (`internal/app/host_chrome.go`): tmux pane title first, OSC window-title fallback otherwise.
+- `implemented` Output forwarder pause/resume with bounded buffering so leader-mode prompts do not drop PTY output by default.
+- `implemented` `Ctrl+K` leader mode: help, session switch, model switch, reconnect, quit.
+- `implemented` `Ctrl+C` passes through to the child PTY session during normal operation.
 - `implemented` `cmd/estuary/main.go` updated to use `TerminalSession` as the primary entry point.
-- `implemented` Light and dark semantic theme token sets shared through one design system.
 
 ## Sessions
 
 - `implemented` Smart startup: reopens the most recent session for the cwd when one exists; creates fresh only when none found.
-- `implemented` Multiple persisted sessions switchable from the command palette; session list sorted by last-opened.
+- `implemented` Multiple persisted sessions switchable from leader-mode prompts; session list sorted by last-opened.
 - `implemented` Session restore: uses `ResumeArgs` (with `NativeSessionID`) when available; falls back to `StartArgs` otherwise.
 - `implemented` No PTY reattachment; sessions always restart the native process on reopen.
-- `implemented` PTY exit handling: overlay footer shows exit code and reconnect prompt; `r` reconnects, `^C` quits.
+- `implemented` PTY exit handling: host chrome and terminal notice show exit status and reconnect guidance.
 - `implemented` `pty_sessions` table: persists PID, attach strategy, native session ID, exit code per PTY spawn.
 - `implemented` `TouchSession`: updates `last_opened_at` and marks session active when reopened.
 - `implemented` `sessions.FindForFolder`: finds the most recent session for a directory path.
@@ -30,10 +27,10 @@ This file is the canonical index of shipped behavior in this repository.
 - `implemented` Session metadata persistence for folder, model, provider, boundary profile, status, and native session ID.
 - `implemented` Same-folder warning when two or more active sessions target the same directory.
 
-## Command Palette
+## Leader Controls
 
-- `planned` `Ctrl+K` palette as the primary control surface for: new session, open/switch session, switch model, switch provider, change boundaries, reconnect/restart native session, ecosystem health, onboarding/import, config sync status, resolve config drift, command sync status.
-- `implemented` `Ctrl+K` palette covering session creation, session switching, model changes, boundary changes, traits, help, theme toggle, and habitat re-probing.
+- `implemented` `Ctrl+K` as the primary control surface with a small global command set.
+- `planned` richer control flows for new session creation, provider switching, boundaries, ecosystem health, and config sync after the terminal simplification lands.
 
 ## Provider Adapters
 
@@ -47,11 +44,10 @@ This file is the canonical index of shipped behavior in this repository.
 
 - `implemented` `HandoffPacket` domain type extending `MigrationCheckpoint`: adds `RecentWorkSummary`, `FileReferences`, `SourceModel`, `SourceProvider`, `TargetModel`, `TargetProvider`, `SwitchType`, `UserNote`.
 - `implemented` `internal/handoff.Service`: generates `HandoffPacket` from live session state (delegates extraction to `migration.Service`); formats packet as injectable prompt text.
-- `implemented` Same-provider switch: `switchModel` stops current PTY, updates session model/habitat, spawns fresh PTY, injects handoff text via stdin after 3-second delay.
-- `implemented` Cross-provider switch: same flow as same-provider switch; `SwitchType` field distinguishes for analytics and future deeper integration.
+- `implemented` Same-provider switch: prefers provider-native runtime model switching when available, then injects structured handoff context.
+- `implemented` Cross-provider switch: updates the session, spawns a fresh PTY, and injects structured handoff context.
 - `implemented` `handoff_packets` table: persists every generated packet for debugging and future retrieval.
-- `implemented` `Switch Model` command palette entry opens a filtered model picker (Bubble Tea alt-screen sub-program); shows current model highlighted.
-- `implemented` Model picker runs while PTY output is paused, preventing visual corruption during the selection flow.
+- `implemented` Model/session selection prompts run while PTY output is paused and buffered, preventing data loss during control flows.
 - `implemented` MigrationCheckpoint: objective, decisions, conversation summary, open tasks, active traits, recent tool outputs (legacy path, being extended into HandoffPacket).
 - `implemented` Continuation-context injection on first post-migration turn as a system message (legacy).
 

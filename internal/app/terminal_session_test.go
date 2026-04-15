@@ -1,73 +1,105 @@
 package app
 
-import "testing"
+import (
+	"bytes"
+	"testing"
+)
 
-func TestNeedsChromeRedraw(t *testing.T) {
-	tests := []struct {
-		name  string
-		chunk []byte
-		want  bool
-	}{
-		{name: "plain output", chunk: []byte("hello"), want: false},
-		{name: "clear screen", chunk: []byte("\x1b[2J\x1b[H"), want: true},
-		{name: "scrollback clear", chunk: []byte("\x1b[3J"), want: true},
-		{name: "terminal reset", chunk: []byte("\x1bc"), want: true},
-		{name: "alternate screen", chunk: []byte("\x1b[?1049h"), want: true},
-	}
+func TestFormatChromeTitleUsesNotice(t *testing.T) {
+	got := formatChromeTitle(chromeState{
+		Model:   "gpt-5.4",
+		Habitat: "codex",
+		Folder:  "~/work",
+		Notice:  "output truncated while command mode was open",
+	})
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := needsChromeRedraw(tt.chunk); got != tt.want {
-				t.Fatalf("needsChromeRedraw(%q) = %v, want %v", tt.chunk, got, tt.want)
-			}
-		})
+	want := "◆ estuary | output truncated while command mode was open"
+	if got != want {
+		t.Fatalf("formatChromeTitle() = %q, want %q", got, want)
 	}
 }
 
-func TestTerminalSanitizerFiltersGlobalSequences(t *testing.T) {
-	s := &terminalSanitizer{}
-	chunk := []byte("\x1b[?2004h\x1b[>7u\x1b[?1004h\x1b[6n\x1b]10;?\x1b\\\x1b[1;24rhello")
+func TestOscTitleChromeWritesOSCSequence(t *testing.T) {
+	var buf bytes.Buffer
+	chrome := &oscTitleChrome{out: &buf}
+	chrome.Apply(chromeState{
+		Model:   "claude-sonnet-4-6",
+		Habitat: "claude",
+		Folder:  "~/repo",
+	})
 
-	got, redraw := s.Filter(chunk)
-
-	if string(got) != "hello" {
-		t.Fatalf("filtered output = %q, want %q", got, "hello")
-	}
-	if !redraw {
-		t.Fatal("expected redraw for filtered terminal-global sequences")
-	}
-}
-
-func TestTerminalSanitizerKeepsRegularCSI(t *testing.T) {
-	s := &terminalSanitizer{}
-	chunk := []byte("\x1b[22;3Hprompt\x1b[?25h")
-
-	got, redraw := s.Filter(chunk)
-
-	if string(got) != string(chunk) {
-		t.Fatalf("filtered output = %q, want %q", got, chunk)
-	}
-	if redraw {
-		t.Fatal("did not expect redraw for regular cursor movement")
+	got := buf.String()
+	want := "\x1b]2;◆ estuary | claude-sonnet-4-6 | claude | ~/repo\a"
+	if got != want {
+		t.Fatalf("OSC title output = %q, want %q", got, want)
 	}
 }
 
-func TestTerminalSanitizerHandlesSplitEscapeSequence(t *testing.T) {
-	s := &terminalSanitizer{}
+func TestOutputForwarderBuffersWhilePaused(t *testing.T) {
+	var out bytes.Buffer
+	fwd := newOutputForwarder(nil, &out, nil)
+	fwd.Pause()
 
-	got1, redraw1 := s.Filter([]byte("\x1b[?20"))
-	got2, redraw2 := s.Filter([]byte("04hbody"))
+	fwd.appendBuffered([]byte("hello"))
+	fwd.appendBuffered([]byte(" world"))
 
-	if len(got1) != 0 {
-		t.Fatalf("first filtered output = %q, want empty", got1)
+	if truncated := fwd.Resume(); truncated {
+		t.Fatal("Resume() returned truncated=true, want false")
 	}
-	if redraw1 {
-		t.Fatal("did not expect redraw until sequence completes")
+	if got := out.String(); got != "hello world" {
+		t.Fatalf("buffered output = %q, want %q", got, "hello world")
 	}
-	if string(got2) != "body" {
-		t.Fatalf("second filtered output = %q, want %q", got2, "body")
+}
+
+func TestOutputForwarderTruncatesOldestBufferedBytes(t *testing.T) {
+	var out bytes.Buffer
+	fwd := newOutputForwarder(nil, &out, nil)
+	fwd.maxBuffered = 5
+	fwd.Pause()
+
+	fwd.appendBuffered([]byte("hello"))
+	fwd.appendBuffered([]byte(" world"))
+
+	if truncated := fwd.Resume(); !truncated {
+		t.Fatal("Resume() returned truncated=false, want true")
 	}
-	if !redraw2 {
-		t.Fatal("expected redraw once split sequence completes")
+	if got := out.String(); got != "world" {
+		t.Fatalf("buffered output = %q, want %q", got, "world")
+	}
+}
+
+func TestRunningInsideTmux(t *testing.T) {
+	t.Setenv("TMUX", "")
+	if runningInsideTmux() {
+		t.Fatal("expected tmux mode to be disabled with empty TMUX")
+	}
+
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+	if !runningInsideTmux() {
+		t.Fatal("expected tmux mode to be enabled when TMUX is set")
+	}
+}
+
+func TestIsCtrlKSupportsCSIUEncoding(t *testing.T) {
+	if !isCtrlK([]byte("\x1b[107;5u")) {
+		t.Fatal("expected Ctrl+K CSI-u encoding to be recognized")
+	}
+	if isCtrlK([]byte("\x1b[107;6u")) {
+		t.Fatal("did not expect non-Ctrl-only modifier sequence to match Ctrl+K")
+	}
+}
+
+func TestIsCtrlCSupportsCSIUEncoding(t *testing.T) {
+	if !isCtrlC([]byte("\x1b[99;5u")) {
+		t.Fatal("expected Ctrl+C CSI-u encoding to be recognized")
+	}
+}
+
+func TestIsLeaderRuneMatchesUpperAndLowercase(t *testing.T) {
+	if !isLeaderRune([]byte("m"), 'm') {
+		t.Fatal("expected lowercase leader rune to match")
+	}
+	if !isLeaderRune([]byte("M"), 'm') {
+		t.Fatal("expected uppercase leader rune to match")
 	}
 }

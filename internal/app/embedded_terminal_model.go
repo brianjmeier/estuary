@@ -1,0 +1,949 @@
+package app
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
+	"github.com/google/uuid"
+
+	"github.com/brianmeier/estuary/internal/domain"
+	"github.com/brianmeier/estuary/internal/habitats"
+	"github.com/brianmeier/estuary/internal/handoff"
+	"github.com/brianmeier/estuary/internal/prereq"
+	"github.com/brianmeier/estuary/internal/providers"
+	"github.com/brianmeier/estuary/internal/sessions"
+	"github.com/brianmeier/estuary/internal/store"
+	termemu "github.com/brianmeier/estuary/internal/terminalemulator"
+)
+
+type embeddedOverlay int
+
+const (
+	embeddedOverlayNone embeddedOverlay = iota
+	embeddedOverlayHelp
+	embeddedOverlaySessions
+	embeddedOverlayModels
+)
+
+type embeddedFrameTickMsg struct{}
+
+type embeddedRuntimeStartedMsg struct {
+	session        domain.Session
+	sessionList    []domain.Session
+	runtime        *embeddedRuntime
+	injectionText  string
+	injectionDelay time.Duration
+	status         string
+	err            error
+}
+
+type embeddedRuntime struct {
+	emulator *termemu.Emulator
+	cmd      *exec.Cmd
+	recordID string
+	closed   bool
+}
+
+type EmbeddedTerminalModel struct {
+	ctx        context.Context
+	cwd        string
+	store      *store.Store
+	prober     *prereq.Prober
+	sessions   *sessions.Service
+	handoffSvc *handoff.Service
+	adapters   map[domain.Habitat]providers.TerminalAdapter
+	trace      *terminalTrace
+
+	theme   Theme
+	width   int
+	height  int
+	status  string
+	health  []domain.HabitatHealth
+	session domain.Session
+
+	sessionList []domain.Session
+	runtime     *embeddedRuntime
+
+	runtimeStarting bool
+	overlay         embeddedOverlay
+	overlayIndex    int
+	leaderActive    bool
+}
+
+func NewEmbeddedTerminalModel(ctx context.Context, cwd string, st *store.Store, prober *prereq.Prober) (*EmbeddedTerminalModel, error) {
+	settings, err := st.LoadAppSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load settings: %w", err)
+	}
+
+	sessionSvc := sessions.NewService(st)
+	sessionList, err := sessionSvc.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+
+	trace, err := newTerminalTraceFromEnv()
+	if err != nil {
+		return nil, err
+	}
+
+	return &EmbeddedTerminalModel{
+		ctx:        ctx,
+		cwd:        cwd,
+		store:      st,
+		prober:     prober,
+		sessions:   sessionSvc,
+		handoffSvc: handoff.NewService(st),
+		adapters: map[domain.Habitat]providers.TerminalAdapter{
+			domain.HabitatClaude: &providers.ClaudeTerminalAdapter{},
+			domain.HabitatCodex:  &providers.CodexTerminalAdapter{},
+		},
+		trace:       trace,
+		theme:       ThemeByName(settings.Theme),
+		status:      "Starting session...",
+		sessionList: sessionList,
+	}, nil
+}
+
+func RunEmbeddedTerminal(ctx context.Context, cwd string, st *store.Store, prober *prereq.Prober) error {
+	model, err := NewEmbeddedTerminalModel(ctx, cwd, st, prober)
+	if err != nil {
+		return err
+	}
+	defer model.shutdownRuntime(true)
+	defer func() {
+		if model.trace != nil {
+			_ = model.trace.Close()
+		}
+	}()
+
+	program := tea.NewProgram(model, tea.WithAltScreen())
+	_, err = program.Run()
+	return err
+}
+
+func (m *EmbeddedTerminalModel) Init() tea.Cmd {
+	return tea.Batch(
+		m.probeCmd(),
+		embeddedFrameTickCmd(),
+	)
+}
+
+func (m *EmbeddedTerminalModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeRuntime()
+		if m.runtime == nil && !m.runtimeStarting {
+			m.runtimeStarting = true
+			return m, m.startInitialRuntimeCmd()
+		}
+		return m, nil
+	case probeResultMsg:
+		m.health = msg.Health
+		return m, nil
+	case embeddedRuntimeStartedMsg:
+		m.runtimeStarting = false
+		if msg.err != nil {
+			m.status = fmt.Sprintf("Start failed: %v", msg.err)
+			return m, nil
+		}
+		m.session = msg.session
+		m.sessionList = prependSession(msg.session, msg.sessionList)
+		m.runtime = msg.runtime
+		m.overlay = embeddedOverlayNone
+		m.overlayIndex = 0
+		m.status = fallback(msg.status, "Session ready.")
+		if msg.injectionText != "" {
+			m.injectAfter(msg.runtime, msg.injectionText, msg.injectionDelay)
+		}
+		return m, nil
+	case embeddedFrameTickMsg:
+		m.handleRuntimeExit()
+		return m, embeddedFrameTickCmd()
+	case tea.KeyMsg:
+		if m.overlay != embeddedOverlayNone {
+			return m.handleOverlayKey(msg)
+		}
+		if m.leaderActive {
+			return m.handleLeaderKey(msg)
+		}
+		if msg.String() == "ctrl+k" {
+			m.leaderActive = true
+			m.status = "leader active: ? help · s sessions · m models · r reconnect · q quit · Ctrl+K cancel"
+			return m, nil
+		}
+		if data, ok := encodeTerminalKey(msg); ok {
+			m.writeToRuntime(data)
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m *EmbeddedTerminalModel) View() string {
+	if m.width == 0 || m.height == 0 {
+		return "Initializing Estuary..."
+	}
+
+	termOuter, sideOuter, _, _ := embeddedLayout(m.width, m.height)
+	terminal := m.renderTerminalPane(termOuter)
+	sidebar := m.renderSidebarPane(sideOuter)
+
+	return lipgloss.NewStyle().
+		Background(m.theme.BGCanvas).
+		Foreground(m.theme.FGPrimary).
+		Width(m.width).
+		Height(m.height).
+		Render(lipgloss.JoinHorizontal(lipgloss.Top, terminal, sidebar))
+}
+
+func (m *EmbeddedTerminalModel) handleOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.overlay {
+	case embeddedOverlayHelp:
+		switch msg.String() {
+		case "esc", "enter", "ctrl+k":
+			m.overlay = embeddedOverlayNone
+			m.status = "Session ready."
+		}
+		return m, nil
+	case embeddedOverlaySessions:
+		items := m.sessionItems()
+		switch msg.String() {
+		case "esc", "ctrl+k":
+			m.overlay = embeddedOverlayNone
+			m.status = "Session ready."
+			return m, nil
+		case "up", "k":
+			if m.overlayIndex > 0 {
+				m.overlayIndex--
+			}
+			return m, nil
+		case "down", "j":
+			if m.overlayIndex < len(items)-1 {
+				m.overlayIndex++
+			}
+			return m, nil
+		case "enter":
+			if len(items) == 0 {
+				m.overlay = embeddedOverlayNone
+				return m, nil
+			}
+			target := items[m.overlayIndex]
+			m.overlay = embeddedOverlayNone
+			return m, m.switchSessionCmd(target)
+		}
+	case embeddedOverlayModels:
+		items := habitats.SupportedModels()
+		switch msg.String() {
+		case "esc", "ctrl+k":
+			m.overlay = embeddedOverlayNone
+			m.status = "Session ready."
+			return m, nil
+		case "up", "k":
+			if m.overlayIndex > 0 {
+				m.overlayIndex--
+			}
+			return m, nil
+		case "down", "j":
+			if m.overlayIndex < len(items)-1 {
+				m.overlayIndex++
+			}
+			return m, nil
+		case "enter":
+			if len(items) == 0 {
+				m.overlay = embeddedOverlayNone
+				return m, nil
+			}
+			m.overlay = embeddedOverlayNone
+			return m, m.switchModelCmd(items[m.overlayIndex])
+		}
+	}
+
+	if data, ok := encodeTerminalKey(msg); ok {
+		m.writeToRuntime(data)
+	}
+	return m, nil
+}
+
+func (m *EmbeddedTerminalModel) handleLeaderKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "ctrl+k", "esc":
+		m.leaderActive = false
+		m.status = "Session ready."
+		return m, nil
+	case "?":
+		m.leaderActive = false
+		m.overlay = embeddedOverlayHelp
+		return m, nil
+	case "s":
+		m.leaderActive = false
+		m.overlay = embeddedOverlaySessions
+		m.overlayIndex = m.currentSessionIndex()
+		m.status = "Select a session."
+		return m, nil
+	case "m":
+		m.leaderActive = false
+		m.overlay = embeddedOverlayModels
+		m.overlayIndex = m.currentModelIndex()
+		m.status = "Select a model."
+		return m, nil
+	case "r":
+		m.leaderActive = false
+		return m, m.reconnectCmd()
+	case "q":
+		m.leaderActive = false
+		m.shutdownRuntime(true)
+		return m, tea.Quit
+	default:
+		m.status = "leader active: ? help · s sessions · m models · r reconnect · q quit · Ctrl+K cancel"
+		return m, nil
+	}
+}
+
+func (m *EmbeddedTerminalModel) renderTerminalPane(width int) string {
+	innerWidth := max(1, width-2)
+	innerHeight := max(1, m.height-2)
+
+	var lines []string
+	if m.runtime == nil || m.runtime.emulator == nil {
+		lines = wrapText(m.status, innerWidth)
+	} else {
+		frame := m.runtime.emulator.GetScreen()
+		lines = append(lines, frame.Rows...)
+	}
+
+	if len(lines) > innerHeight {
+		lines = lines[:innerHeight]
+	}
+	for i, line := range lines {
+		lines[i] = fitTerminalLine(line, innerWidth)
+	}
+	for len(lines) < innerHeight {
+		lines = append(lines, strings.Repeat(" ", innerWidth))
+	}
+
+	return renderTerminalFrame(m.theme, width, lines)
+}
+
+func (m *EmbeddedTerminalModel) renderSidebarPane(width int) string {
+	style := panelStyle(m.theme, true)
+	contentWidth := max(16, width-style.GetHorizontalFrameSize())
+	contentHeight := max(1, m.height-style.GetVerticalFrameSize())
+
+	var body string
+	switch m.overlay {
+	case embeddedOverlayHelp:
+		body = m.renderHelpSidebar(contentWidth)
+	case embeddedOverlaySessions:
+		body = m.renderSessionsSidebar(contentWidth)
+	case embeddedOverlayModels:
+		body = m.renderModelsSidebar(contentWidth)
+	default:
+		body = m.renderInfoSidebar(contentWidth)
+	}
+
+	return style.
+		Width(contentWidth).
+		Height(contentHeight).
+		Render(body)
+}
+
+func (m *EmbeddedTerminalModel) renderInfoSidebar(width int) string {
+	accent := lipgloss.NewStyle().Foreground(m.theme.AccentWater).Bold(true)
+	muted := mutedStyle(m.theme)
+
+	lines := []string{
+		accent.Render("◆ estuary"),
+		"",
+		m.panelTitle("Session"),
+		fmt.Sprintf("%s", fallback(shortDir(m.session.FolderPath), shortDir(m.cwd))),
+		fmt.Sprintf("%s  [%s]", fallback(m.session.CurrentModel, "claude-sonnet-4-6"), fallback(string(m.session.CurrentHabitat), "claude")),
+		"",
+		m.panelTitle("Runtime"),
+		m.runtimeSummary(),
+		"",
+		m.panelTitle("Shortcuts"),
+		"Ctrl+K ?  help",
+		"Ctrl+K s  switch session",
+		"Ctrl+K m  switch model",
+		"Ctrl+K r  reconnect",
+		"Ctrl+K q  quit",
+	}
+
+	if health := m.renderHealthSummary(width); health != "" {
+		lines = append(lines, "", m.panelTitle("Providers"), health)
+	}
+
+	lines = append(lines, "", m.panelTitle("Status"))
+	for _, line := range wrapText(m.status, width) {
+		lines = append(lines, muted.Render(line))
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) renderHelpSidebar(width int) string {
+	muted := mutedStyle(m.theme)
+	lines := []string{
+		m.panelTitle("Leader Help"),
+		"",
+		"Ctrl+K ?  show help",
+		"Ctrl+K s  choose another session",
+		"Ctrl+K m  choose another model",
+		"Ctrl+K r  restart the current provider terminal",
+		"Ctrl+K q  quit Estuary",
+		"",
+		muted.Render("Arrow keys, Enter, Tab, Ctrl+C, and shell keys go straight to the embedded terminal."),
+		"",
+		muted.Render("Press Esc or Enter to return."),
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) renderSessionsSidebar(width int) string {
+	lines := []string{m.panelTitle("Switch Session"), ""}
+	items := m.sessionItems()
+	if len(items) == 0 {
+		lines = append(lines, mutedStyle(m.theme).Render("No sessions yet."))
+	} else {
+		for i, session := range items {
+			marker := "  "
+			if i == m.overlayIndex {
+				marker = "▸ "
+			}
+			label := fmt.Sprintf("%s%s  [%s / %s]", marker, shortDir(session.FolderPath), session.CurrentHabitat, session.CurrentModel)
+			if session.ID == m.session.ID {
+				label += "  current"
+			}
+			if i == m.overlayIndex {
+				lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.AccentWater).Bold(true).Render(label))
+			} else {
+				lines = append(lines, label)
+			}
+		}
+	}
+	lines = append(lines, "", mutedStyle(m.theme).Render("↑↓ move · enter select · esc cancel"))
+	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) renderModelsSidebar(width int) string {
+	lines := []string{m.panelTitle("Switch Model"), ""}
+	items := habitats.SupportedModels()
+	if len(items) == 0 {
+		lines = append(lines, mutedStyle(m.theme).Render("No models available."))
+	} else {
+		for i, model := range items {
+			marker := "  "
+			if i == m.overlayIndex {
+				marker = "▸ "
+			}
+			label := fmt.Sprintf("%s%s  [%s]", marker, model.ID, model.Habitat)
+			if model.ID == m.session.CurrentModel && model.Habitat == m.session.CurrentHabitat {
+				label += "  current"
+			}
+			if i == m.overlayIndex {
+				lines = append(lines, lipgloss.NewStyle().Foreground(m.theme.AccentWater).Bold(true).Render(label))
+			} else {
+				lines = append(lines, label)
+			}
+		}
+	}
+	lines = append(lines, "", mutedStyle(m.theme).Render("↑↓ move · enter select · esc cancel"))
+	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) runtimeSummary() string {
+	if m.runtime == nil {
+		return "starting"
+	}
+	if m.runtime.closed {
+		if m.runtime.cmd != nil && m.runtime.cmd.ProcessState != nil {
+			return fmt.Sprintf("exited (%d)", m.runtime.cmd.ProcessState.ExitCode())
+		}
+		return "exited"
+	}
+	return "running"
+}
+
+func (m *EmbeddedTerminalModel) renderHealthSummary(width int) string {
+	if len(m.health) == 0 {
+		return ""
+	}
+
+	var lines []string
+	for _, item := range m.health {
+		status := "missing"
+		if item.Installed && item.Authenticated {
+			status = "ready"
+		} else if item.Installed {
+			status = "needs auth"
+		}
+		lines = append(lines, fmt.Sprintf("%s  %s", item.Habitat, status))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m *EmbeddedTerminalModel) startInitialRuntimeCmd() tea.Cmd {
+	cols, rows := m.currentTerminalSize()
+	return func() tea.Msg {
+		session, err := m.findOrCreateSession()
+		if err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		if err := m.store.TouchSession(m.ctx, session.ID); err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "")
+		if err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		sessionList, listErr := m.sessions.List(m.ctx)
+		if listErr != nil {
+			return embeddedRuntimeStartedMsg{err: listErr}
+		}
+		return embeddedRuntimeStartedMsg{
+			session:     session,
+			sessionList: sessionList,
+			runtime:     runtime,
+			status:      "Session ready.",
+		}
+	}
+}
+
+func (m *EmbeddedTerminalModel) reconnectCmd() tea.Cmd {
+	if m.session.ID == "" {
+		return nil
+	}
+	session := m.session
+	m.status = "Reconnecting..."
+	m.shutdownRuntime(true)
+	cols, rows := m.currentTerminalSize()
+	return func() tea.Msg {
+		if err := m.store.TouchSession(m.ctx, session.ID); err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyFresh, "")
+		if err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		sessionList, listErr := m.sessions.List(m.ctx)
+		if listErr != nil {
+			return embeddedRuntimeStartedMsg{err: listErr}
+		}
+		return embeddedRuntimeStartedMsg{
+			session:     session,
+			sessionList: sessionList,
+			runtime:     runtime,
+			status:      "Reconnected.",
+		}
+	}
+}
+
+func (m *EmbeddedTerminalModel) switchSessionCmd(target domain.Session) tea.Cmd {
+	if target.ID == "" || target.ID == m.session.ID {
+		m.status = "Session ready."
+		return nil
+	}
+
+	m.status = fmt.Sprintf("Switching to %s...", shortDir(target.FolderPath))
+	m.shutdownRuntime(true)
+	cols, rows := m.currentTerminalSize()
+
+	return func() tea.Msg {
+		if err := m.store.TouchSession(m.ctx, target.ID); err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, target, cols, rows, domain.AttachStrategyFresh, "")
+		if err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		sessionList, listErr := m.sessions.List(m.ctx)
+		if listErr != nil {
+			return embeddedRuntimeStartedMsg{err: listErr}
+		}
+		return embeddedRuntimeStartedMsg{
+			session:     target,
+			sessionList: sessionList,
+			runtime:     runtime,
+			status:      fmt.Sprintf("Switched to %s.", shortDir(target.FolderPath)),
+		}
+	}
+}
+
+func (m *EmbeddedTerminalModel) switchModelCmd(target domain.ModelDescriptor) tea.Cmd {
+	if m.session.ID == "" {
+		return nil
+	}
+	if target.ID == m.session.CurrentModel && target.Habitat == m.session.CurrentHabitat {
+		m.status = "That model is already active."
+		return nil
+	}
+
+	switchType := domain.SwitchTypeSameProvider
+	if target.Habitat != m.session.CurrentHabitat {
+		switchType = domain.SwitchTypeCrossProvider
+	}
+
+	packet, err := m.handoffSvc.Generate(m.ctx, m.session, target.ID, target.Habitat, switchType)
+	if err != nil {
+		_ = m.store.AppendEvent(m.ctx, m.session.ID, "handoff.error", map[string]any{"error": err.Error()})
+	}
+
+	adapter := m.adapters[m.session.CurrentHabitat]
+	if adapter == nil {
+		m.status = fmt.Sprintf("No adapter for %s.", m.session.CurrentHabitat)
+		return nil
+	}
+	if input := adapter.ModelSwitchInput(target.ID); input != "" && m.runtime != nil && !m.runtime.closed {
+		m.session.CurrentModel = target.ID
+		m.session.CurrentHabitat = target.Habitat
+		if err := m.store.UpdateSession(m.ctx, m.session); err != nil {
+			m.status = fmt.Sprintf("Update model failed: %v", err)
+			return nil
+		}
+		m.writeToRuntime([]byte(input))
+		if packet.ID != "" {
+			m.injectAfter(m.runtime, handoff.InjectionText(packet), 500*time.Millisecond)
+			_ = m.store.AppendEvent(m.ctx, m.session.ID, "handoff.injected", map[string]any{
+				"packet_id":   packet.ID,
+				"switch_type": string(switchType),
+			})
+		}
+		m.status = fmt.Sprintf("Switched to %s.", target.ID)
+		return nil
+	}
+
+	session := m.session
+	session.CurrentModel = target.ID
+	session.CurrentHabitat = target.Habitat
+	session.NativeSessionID = ""
+
+	if err := m.store.UpdateSession(m.ctx, session); err != nil {
+		m.status = fmt.Sprintf("Update model failed: %v", err)
+		return nil
+	}
+
+	m.session = session
+	m.status = fmt.Sprintf("Switching to %s...", target.ID)
+	m.shutdownRuntime(true)
+	cols, rows := m.currentTerminalSize()
+
+	injectionText := ""
+	if packet.ID != "" {
+		injectionText = handoff.InjectionText(packet)
+	}
+
+	return func() tea.Msg {
+		runtime, err := launchEmbeddedRuntime(m.ctx, m.store, m.adapters, session, cols, rows, domain.AttachStrategyHandoff, packet.ID)
+		if err != nil {
+			return embeddedRuntimeStartedMsg{err: err}
+		}
+		sessionList, listErr := m.sessions.List(m.ctx)
+		if listErr != nil {
+			return embeddedRuntimeStartedMsg{err: listErr}
+		}
+		if packet.ID != "" {
+			_ = m.store.AppendEvent(m.ctx, session.ID, "handoff.injected", map[string]any{
+				"packet_id":   packet.ID,
+				"switch_type": string(switchType),
+			})
+		}
+		return embeddedRuntimeStartedMsg{
+			session:        session,
+			sessionList:    sessionList,
+			runtime:        runtime,
+			injectionText:  injectionText,
+			injectionDelay: 1200 * time.Millisecond,
+			status:         fmt.Sprintf("Switched to %s.", target.ID),
+		}
+	}
+}
+
+func (m *EmbeddedTerminalModel) injectAfter(runtime *embeddedRuntime, text string, delay time.Duration) {
+	if runtime == nil || runtime.emulator == nil || strings.TrimSpace(text) == "" {
+		return
+	}
+	go func(current *embeddedRuntime) {
+		time.Sleep(delay)
+		if m.runtime != current || current.closed {
+			return
+		}
+		_, _ = current.emulator.Write([]byte(text + "\n"))
+	}(runtime)
+}
+
+func (m *EmbeddedTerminalModel) handleRuntimeExit() {
+	if m.runtime == nil || m.runtime.closed || m.runtime.emulator == nil || !m.runtime.emulator.IsProcessExited() {
+		return
+	}
+
+	exitCode := 0
+	if m.runtime.cmd != nil && m.runtime.cmd.ProcessState != nil {
+		exitCode = m.runtime.cmd.ProcessState.ExitCode()
+	}
+
+	m.closeRuntimeRecord(exitCode)
+	m.status = fmt.Sprintf("Session ended (exit %d) · Ctrl+K r reconnect · Ctrl+K q quit", exitCode)
+}
+
+func (m *EmbeddedTerminalModel) shutdownRuntime(kill bool) {
+	if m.runtime == nil {
+		return
+	}
+	m.closeRuntimeRecord(0)
+	if kill && m.runtime.cmd != nil && m.runtime.cmd.Process != nil && m.runtime.cmd.ProcessState == nil {
+		_ = m.runtime.cmd.Process.Kill()
+	}
+	if m.runtime.emulator != nil {
+		_ = m.runtime.emulator.Close()
+	}
+}
+
+func (m *EmbeddedTerminalModel) closeRuntimeRecord(exitCode int) {
+	if m.runtime == nil || m.runtime.closed {
+		return
+	}
+	if m.runtime.recordID != "" {
+		_ = m.store.ClosePTYSession(m.ctx, m.runtime.recordID, exitCode)
+	}
+	if m.session.ID != "" {
+		_ = m.store.UpdateSessionStatus(m.ctx, m.session.ID, domain.SessionStatusIdle, m.session.NativeSessionID)
+	}
+	m.runtime.closed = true
+}
+
+func (m *EmbeddedTerminalModel) resizeRuntime() {
+	if m.runtime == nil || m.runtime.emulator == nil {
+		return
+	}
+	cols, rows := m.currentTerminalSize()
+	_ = m.runtime.emulator.Resize(cols, rows)
+}
+
+func (m *EmbeddedTerminalModel) writeToRuntime(data []byte) {
+	if len(data) == 0 || m.runtime == nil || m.runtime.closed || m.runtime.emulator == nil {
+		return
+	}
+	if m.trace != nil {
+		m.trace.Logf("stdin forwarded=%s", traceBytes(data))
+	}
+	_, _ = m.runtime.emulator.Write(data)
+}
+
+func (m *EmbeddedTerminalModel) findOrCreateSession() (domain.Session, error) {
+	existing, found, err := m.sessions.FindForFolder(m.ctx, m.cwd)
+	if err != nil {
+		return domain.Session{}, err
+	}
+	if found {
+		return existing, nil
+	}
+	session, _, err := m.sessions.CreateCurrent(m.ctx, m.cwd)
+	return session, err
+}
+
+func (m *EmbeddedTerminalModel) probeCmd() tea.Cmd {
+	return func() tea.Msg {
+		return probeResultMsg{Health: m.prober.ProbeAll(m.ctx)}
+	}
+}
+
+func (m *EmbeddedTerminalModel) sessionItems() []domain.Session {
+	return m.sessionList
+}
+
+func (m *EmbeddedTerminalModel) currentSessionIndex() int {
+	for i, session := range m.sessionList {
+		if session.ID == m.session.ID {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *EmbeddedTerminalModel) currentModelIndex() int {
+	models := habitats.SupportedModels()
+	for i, model := range models {
+		if model.ID == m.session.CurrentModel && model.Habitat == m.session.CurrentHabitat {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m *EmbeddedTerminalModel) currentTerminalSize() (cols, rows int) {
+	if m.width == 0 || m.height == 0 {
+		return 80, 24
+	}
+	_, _, cols, rows = embeddedLayout(m.width, m.height)
+	return cols, rows
+}
+
+func embeddedFrameTickCmd() tea.Cmd {
+	return tea.Tick(time.Second/30, func(time.Time) tea.Msg {
+		return embeddedFrameTickMsg{}
+	})
+}
+
+func embeddedLayout(width, height int) (termOuter, sideOuter, termCols, termRows int) {
+	sideOuter = 32
+	if width >= 140 {
+		sideOuter = 36
+	}
+	if width <= 100 {
+		sideOuter = 28
+	}
+	if maxSide := max(24, width/3); sideOuter > maxSide {
+		sideOuter = maxSide
+	}
+	termOuter = width - sideOuter
+	if termOuter < 24 {
+		termOuter = max(16, width-24)
+		sideOuter = max(8, width-termOuter)
+	}
+	termCols = max(8, termOuter-2)
+	termRows = max(4, height-2)
+	return termOuter, sideOuter, termCols, termRows
+}
+
+func terminalPaneStyle(theme Theme) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(theme.BorderSoft).
+		Background(theme.BGSurface)
+}
+
+func fitTerminalLine(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	line = xansi.Truncate(line, width, "")
+	if w := xansi.StringWidth(line); w < width {
+		line += strings.Repeat(" ", width-w)
+	}
+	return line
+}
+
+func renderTerminalFrame(theme Theme, width int, lines []string) string {
+	border := lipgloss.NewStyle().Foreground(theme.BorderSoft)
+	fill := lipgloss.NewStyle().Background(theme.BGSurface)
+
+	innerWidth := max(1, width-2)
+	top := border.Render("╭" + strings.Repeat("─", innerWidth) + "╮")
+	bottom := border.Render("╰" + strings.Repeat("─", innerWidth) + "╯")
+
+	rendered := make([]string, 0, len(lines)+2)
+	rendered = append(rendered, top)
+	for _, line := range lines {
+		rendered = append(rendered,
+			border.Render("│")+renderTerminalContent(fill, fitTerminalLine(line, innerWidth), innerWidth)+border.Render("│"),
+		)
+	}
+	rendered = append(rendered, bottom)
+	return strings.Join(rendered, "\n")
+}
+
+func renderTerminalContent(fill lipgloss.Style, line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	w := xansi.StringWidth(line)
+	if w >= width {
+		return line
+	}
+	return line + fill.Render(strings.Repeat(" ", width-w))
+}
+
+func (m *EmbeddedTerminalModel) panelTitle(s string) string {
+	return lipgloss.NewStyle().Foreground(m.theme.AccentClay).Bold(true).Render(s)
+}
+
+func launchEmbeddedRuntime(
+	ctx context.Context,
+	st *store.Store,
+	adapters map[domain.Habitat]providers.TerminalAdapter,
+	session domain.Session,
+	cols int,
+	rows int,
+	strategy domain.AttachStrategy,
+	handoffPacketID string,
+) (*embeddedRuntime, error) {
+	adapter, ok := adapters[session.CurrentHabitat]
+	if !ok {
+		return nil, fmt.Errorf("no terminal adapter for provider %q", session.CurrentHabitat)
+	}
+
+	strategyUsed := strategy
+	var command string
+	var args []string
+	var env []string
+
+	switch strategy {
+	case domain.AttachStrategyHandoff:
+		command, args, env = adapter.HandoffArgs(session, "")
+	case domain.AttachStrategyResume:
+		if session.NativeSessionID != "" {
+			command, args, env = adapter.ResumeArgs(session, session.NativeSessionID)
+		} else {
+			command, args, env = adapter.StartArgs(session)
+			strategyUsed = domain.AttachStrategyFresh
+		}
+	default:
+		if session.NativeSessionID != "" {
+			command, args, env = adapter.ResumeArgs(session, session.NativeSessionID)
+			strategyUsed = domain.AttachStrategyResume
+		} else {
+			command, args, env = adapter.StartArgs(session)
+		}
+	}
+
+	emu, err := termemu.New(cols, rows)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Env = append(os.Environ(), env...)
+	if session.FolderPath != "" {
+		cmd.Dir = session.FolderPath
+	}
+
+	if err := emu.StartCommand(cmd); err != nil {
+		_ = emu.Close()
+		return nil, err
+	}
+
+	_ = st.TouchSession(ctx, session.ID)
+
+	recordID := uuid.NewString()
+	pid := 0
+	if cmd.Process != nil {
+		pid = cmd.Process.Pid
+	}
+	_ = st.SavePTYSession(ctx, domain.TerminalSession{
+		ID:              recordID,
+		SessionID:       session.ID,
+		Provider:        session.CurrentHabitat,
+		PID:             pid,
+		AttachStrategy:  strategyUsed,
+		NativeSessionID: session.NativeSessionID,
+		HandoffPacketID: handoffPacketID,
+		Status:          domain.ProviderRuntimeStatusRunning,
+		StartedAt:       time.Now().UTC(),
+	})
+
+	return &embeddedRuntime{
+		emulator: emu,
+		cmd:      cmd,
+		recordID: recordID,
+	}, nil
+}

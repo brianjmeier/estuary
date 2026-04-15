@@ -35,12 +35,7 @@ func main() {
 
 	prober := prereq.NewProber()
 
-	ts, err := app.NewTerminalSession(ctx, cwd, st, prober)
-	if err != nil {
-		log.Fatalf("create terminal session: %v", err)
-	}
-
-	if err := ts.Run(); err != nil && err.Error() != "quit" {
+	if err := app.RunEmbeddedTerminal(ctx, cwd, st, prober); err != nil && err.Error() != "quit" {
 		log.Printf("estuary: %v", err)
 	}
 }
