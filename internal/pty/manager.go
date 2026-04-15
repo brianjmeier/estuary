@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sync"
 
+	"github.com/brianmeier/estuary/internal/ptyenv"
 	"github.com/creack/pty"
 )
 
@@ -61,7 +62,7 @@ func (m *Manager) Spawn(ctx context.Context, opts SpawnOpts) (*Session, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, opts.Cmd, opts.Args...)
-	cmd.Env = append(os.Environ(), opts.Env...)
+	cmd.Env = ptyenv.Build(os.Environ(), opts.Env)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}

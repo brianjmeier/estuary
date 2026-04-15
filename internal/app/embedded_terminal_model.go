@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -11,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/google/uuid"
 
 	"github.com/brianmeier/estuary/internal/domain"
@@ -321,19 +321,14 @@ func (m *EmbeddedTerminalModel) renderTerminalPane(width int) string {
 	if m.runtime == nil || m.runtime.emulator == nil {
 		lines = wrapText(m.status, innerWidth)
 	} else {
-		lines = append(lines, m.runtime.emulator.GetPlainScreen()...)
+		lines = append(lines, m.runtime.emulator.GetScreen().Rows...)
 	}
 
 	if len(lines) > innerHeight {
 		lines = lines[:innerHeight]
 	}
 	for i, line := range lines {
-		runes := []rune(line)
-		if len(runes) > innerWidth {
-			lines[i] = string(runes[:innerWidth])
-			continue
-		}
-		lines[i] = line + strings.Repeat(" ", innerWidth-len(runes))
+		lines[i] = fitANSIWidth(line, innerWidth)
 	}
 	for len(lines) < innerHeight {
 		lines = append(lines, strings.Repeat(" ", innerWidth))
@@ -344,6 +339,16 @@ func (m *EmbeddedTerminalModel) renderTerminalPane(width int) string {
 		Width(innerWidth).
 		Height(innerHeight).
 		Render(content)
+}
+
+func fitANSIWidth(line string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if ansi.StringWidth(line) > width {
+		line = ansi.Truncate(line, width, "")
+	}
+	return line + strings.Repeat(" ", max(0, width-ansi.StringWidth(line)))
 }
 
 func (m *EmbeddedTerminalModel) renderSidebarPane(width int) string {
@@ -711,7 +716,12 @@ func (m *EmbeddedTerminalModel) terminalSnapshot() []string {
 	if m.runtime == nil || m.runtime.closed || m.runtime.emulator == nil {
 		return nil
 	}
-	return m.runtime.emulator.GetPlainScreen()
+	frame := m.runtime.emulator.GetScreen()
+	snapshot := make([]string, 0, len(frame.Rows))
+	for _, row := range frame.Rows {
+		snapshot = append(snapshot, ansi.Strip(row))
+	}
+	return snapshot
 }
 
 func (m *EmbeddedTerminalModel) handoffContextLines() []string {
@@ -1039,7 +1049,7 @@ func launchEmbeddedRuntime(
 	}
 
 	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Env = append(os.Environ(), env...)
+	cmd.Env = env
 	if session.FolderPath != "" {
 		cmd.Dir = session.FolderPath
 	}

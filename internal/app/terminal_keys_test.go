@@ -6,8 +6,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/brianmeier/estuary/internal/domain"
+	termemu "github.com/brianmeier/estuary/internal/terminalemulator"
 )
 
 func TestEncodeTerminalKeyCtrlC(t *testing.T) {
@@ -64,6 +66,91 @@ func TestEmbeddedViewFitsRequestedSize(t *testing.T) {
 	}
 	if got := lipgloss.Height(view); got != 30 {
 		t.Fatalf("View() height = %d, want %d", got, 30)
+	}
+}
+
+func TestEmbeddedViewKeepsSidebarWithStyledTerminalOutput(t *testing.T) {
+	emu, err := termemu.New(86, 28)
+	if err != nil {
+		t.Fatalf("termemu.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = emu.Close()
+	})
+	if _, err := emu.FeedOutput([]byte("\x1b[31mred terminal\x1b[0m")); err != nil {
+		t.Fatalf("FeedOutput() error = %v", err)
+	}
+
+	model := &EmbeddedTerminalModel{
+		theme:  DarkTheme(),
+		width:  120,
+		height: 30,
+		status: "Session ready.",
+		session: domain.Session{
+			FolderPath:     "/tmp/agenator",
+			CurrentModel:   "claude-sonnet-4-6",
+			CurrentHabitat: domain.HabitatClaude,
+		},
+		runtime: &embeddedRuntime{emulator: emu},
+	}
+
+	view := model.View()
+	plain := ansi.Strip(view)
+	if !strings.Contains(plain, "red terminal") {
+		t.Fatalf("View() missing provider terminal output: %q", plain)
+	}
+	if !strings.Contains(plain, "◆ Estuary") {
+		t.Fatalf("View() missing sidebar title: %q", plain)
+	}
+	if !strings.Contains(view, "\x1b[31m") {
+		t.Fatalf("View() did not preserve provider ANSI color: %q", view)
+	}
+	if got := lipgloss.Width(view); got != 120 {
+		t.Fatalf("View() width = %d, want %d", got, 120)
+	}
+	if got := lipgloss.Height(view); got != 30 {
+		t.Fatalf("View() height = %d, want %d", got, 30)
+	}
+}
+
+func TestFitANSIWidthPreservesStyleAndConstrainsVisibleWidth(t *testing.T) {
+	got := fitANSIWidth("\x1b[31mred terminal\x1b[0m", 8)
+	if !strings.Contains(got, "\x1b[31m") {
+		t.Fatalf("fitANSIWidth() stripped ANSI style: %q", got)
+	}
+	if width := ansi.StringWidth(got); width != 8 {
+		t.Fatalf("fitANSIWidth() visible width = %d, want 8: %q", width, got)
+	}
+	if plain := ansi.Strip(got); plain != "red term" {
+		t.Fatalf("fitANSIWidth() plain output = %q, want %q", plain, "red term")
+	}
+}
+
+func TestTerminalSnapshotStripsANSIForHandoffOnly(t *testing.T) {
+	emu, err := termemu.New(20, 4)
+	if err != nil {
+		t.Fatalf("termemu.New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = emu.Close()
+	})
+	if _, err := emu.FeedOutput([]byte("\x1b[31mred terminal\x1b[0m")); err != nil {
+		t.Fatalf("FeedOutput() error = %v", err)
+	}
+
+	model := &EmbeddedTerminalModel{
+		runtime: &embeddedRuntime{emulator: emu},
+	}
+
+	snapshot := model.terminalSnapshot()
+	if len(snapshot) == 0 {
+		t.Fatal("terminalSnapshot() returned no rows")
+	}
+	if strings.Contains(snapshot[0], "\x1b[31m") {
+		t.Fatalf("terminalSnapshot() leaked ANSI into handoff context: %q", snapshot[0])
+	}
+	if !strings.HasPrefix(snapshot[0], "red terminal") {
+		t.Fatalf("terminalSnapshot()[0] = %q, want red terminal prefix", snapshot[0])
 	}
 }
 

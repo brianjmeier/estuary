@@ -1,3 +1,3 @@
-// Package emulator provides a terminal emulator interface for Bubble Tea applications.
-// It sits in between the bubbleterm bubble and a pty provider, handling terminal output, input, and resizing.
+// Package emulator wraps a PTY and a maintained virtual terminal parser for
+// Estuary's embedded Bubble Tea terminal pane.
 package emulator
