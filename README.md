@@ -13,23 +13,13 @@ The current implemented feature inventory lives in [FEATURES.md](./FEATURES.md).
 
 ## Install
 
-If Nix is not already available in your shell, load it first:
+Install the latest release:
 
 ```bash
-source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+curl -fsSL https://raw.githubusercontent.com/brianjmeier/estuary/main/install.sh | bash
 ```
 
-Then run Estuary directly from the repo:
-
-```bash
-nix run .#estuary
-```
-
-Or install it onto your profile:
-
-```bash
-nix profile install .#estuary
-```
+The installer supports macOS arm64 and Linux x64, installs `estuary` to `/usr/local/bin`, and uses `sudo` only when that directory is not writable.
 
 After that, launch it with:
 
@@ -60,6 +50,24 @@ When Estuary starts:
 - it syncs your `~/.config/estuary/commands/` directory into provider-native command folders
 - it syncs shared config (bash permissions, skills, settings) into each provider's config
 - provider-specific settings stay in a provider-scoped section of `~/.config/estuary/config.yaml`
+
+You can also run Estuary directly from the repo with Nix. If Nix is not already available in your shell, load it first:
+
+```bash
+source /nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh
+```
+
+Then run:
+
+```bash
+nix run .#estuary
+```
+
+Or install it onto your Nix profile:
+
+```bash
+nix profile install .#estuary
+```
 
 ## Development
 
